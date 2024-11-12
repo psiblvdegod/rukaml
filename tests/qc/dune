@@ -1,0 +1,22 @@
+(library
+ (name qc_lib)
+ (modules qc_lib)
+ (libraries miniml qcheck)
+ ;(inline_tests)
+ (flags
+  (:standard -dsource))
+ (preprocess
+  (staged_pps
+   ppx_import
+   ;ppx_deriving.show
+   ppx_deriving_qcheck
+   ;
+   )))
+
+(executable
+ (name qc)
+ (modules qc)
+ (libraries qc_lib))
+
+(cram
+ (deps ./qc.exe))

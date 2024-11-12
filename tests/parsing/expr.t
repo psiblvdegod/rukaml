@@ -89,3 +89,8 @@
   "if 1 then 2 else x * fac (y-1)"
   Parsed: (if 1 then 2 else x * (fac (y - 1)))
 #
+
+
+  $ cat << EOF | ./REPL.exe -e -
+  > (fun Dep -> let Mab = true arw in 3234964472276681775 ())
+  > EOF
