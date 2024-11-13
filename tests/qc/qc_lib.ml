@@ -6,8 +6,18 @@ let patname =
   <*> char_range 'a' 'z'
 ;;
 
+(* Empty list or a singleton *)
+let short_list arg =
+  let open QCheck.Gen in
+  oneof [ pure []; pure (fun x -> [ x ]) <*> arg ]
+;;
+
 type pattern =
-  [%import: (Miniml.Parsetree.pattern[@with string := (string [@gen patname])])]
+  [%import:
+    (Miniml.Parsetree.pattern
+    [@with
+      string := (string [@gen patname]);
+      list := (list [@gen short_list (gen_pattern_sized (n / 3))])])]
 [@@deriving qcheck]
 
 let arbitrary_pattern_auto =
@@ -26,8 +36,70 @@ let varname =
 type const = [%import: Miniml.Parsetree.const] [@@deriving qcheck]
 type rec_flag = [%import: Miniml.Parsetree.rec_flag] [@@deriving qcheck]
 
-type expr = [%import: (Miniml.Parsetree.expr[@with string := (string [@gen varname])])]
+type expr =
+  [%import:
+    (Miniml.Parsetree.expr
+    [@with
+      string := (string [@gen varname]);
+      list := (list [@gen short_list (gen_expr_sized (n / 3))])])]
 [@@deriving qcheck]
+(* include struct
+  let _ = fun (_ : expr) -> ()
+
+  let rec gen_expr_sized n =
+    match n with
+    | 0 ->
+      QCheck.Gen.frequency
+        [ 1, QCheck.Gen.pure EUnit
+        ; 1, QCheck.Gen.map (fun gen0 -> EConst gen0) gen_const
+        ; 1, QCheck.Gen.map (fun gen0 -> EVar gen0) varname
+        ]
+    | _ ->
+      QCheck.Gen.frequency
+        [ 1, QCheck.Gen.pure EUnit
+        ; 1, QCheck.Gen.map (fun gen0 -> EConst gen0) gen_const
+        ; 1, QCheck.Gen.map (fun gen0 -> EVar gen0) varname
+        ; ( 1
+          , QCheck.Gen.map
+              (fun (gen0, gen1, gen2) -> EIf (gen0, gen1, gen2))
+              (QCheck.Gen.triple
+                 (gen_expr_sized (n / 2))
+                 (gen_expr_sized (n / 2))
+                 (gen_expr_sized (n / 2))) )
+        ; ( 1
+          , QCheck.Gen.map
+              (fun (gen0, gen1) -> ELam (gen0, gen1))
+              (QCheck.Gen.pair gen_pattern (gen_expr_sized (n / 2))) )
+        ; ( 1
+          , QCheck.Gen.map
+              (fun (gen0, gen1) -> EApp (gen0, gen1))
+              (QCheck.Gen.pair (gen_expr_sized (n / 2)) (gen_expr_sized (n / 2))) )
+        ; ( 1
+          , QCheck.Gen.map
+              (fun (gen0, gen1, gen2) -> ETuple (gen0, gen1, gen2))
+              (QCheck.Gen.triple
+                 (gen_expr_sized (n / 2))
+                 (gen_expr_sized (n / 2))
+                 (short_list (gen_expr_sized (n / 2)))) )
+        ; ( 1
+          , QCheck.Gen.map
+              (fun (gen0, gen1, gen2, gen3) -> ELet (gen0, gen1, gen2, gen3))
+              (QCheck.Gen.quad
+                 gen_rec_flag
+                 gen_pattern
+                 (gen_expr_sized (n / 2))
+                 (gen_expr_sized (n / 2))) )
+        ]
+  ;;
+
+  let _ = gen_expr_sized
+  let gen_expr = QCheck.Gen.sized gen_expr_sized
+  let _ = gen_expr
+  let arb_expr_sized n = QCheck.make @@ gen_expr_sized n
+  let _ = arb_expr_sized
+  let arb_expr = QCheck.make @@ gen_expr
+  let _ = arb_expr
+end *)
 
 let arbitrary_expr =
   let open QCheck.Iter in
