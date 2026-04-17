@@ -10,6 +10,7 @@ let printf, fprintf, sprintf = Stdlib.Printf.(printf, fprintf, sprintf)
 let array_get = Array.get
 let array_set = Array.set
 let list_length = List.length
+let sys_argv = Sys.argv
 
 let end_of_input ic =
   match input_char ic with
@@ -82,6 +83,10 @@ let int_of_digits chs =
 ;;
 
 (* ast *)
+
+type 'a option =
+  | Some of 'a
+  | None
 
 type cpp_type =
   | CType_int
@@ -534,7 +539,9 @@ let add_local name offset =
 let pp_local_var oc name =
   let rec loop vars =
     match vars with
-    | [] -> printf "ERROR: %s not found !!!\n" name
+    | [] ->
+      let () = printf "[compiler] error: var %s not found\n" name in
+      exit 1
     | (name2, offset) :: tail ->
       if name = name2 then fprintf oc "%d(fp)" offset else loop tail
   in
@@ -605,7 +612,9 @@ let rec codegen_statement oc epilogue stmt =
     ()
   | CStmt_expr e -> codegen_expr oc e
   | CStmt_block stmts -> list_iter (codegen_statement oc epilogue) stmts
-  | _ -> printf "ERROR: not implemented codegen_statement\n"
+  | _ ->
+    let () = printf "[compiler] error: not implemented codegen_statement\n" in
+    exit 1
 ;;
 
 let pp_prologue oc fname =
@@ -676,10 +685,50 @@ let rec input_all ic =
   loop []
 ;;
 
-let input_path = "program.cpp"
-let output_path = "_build/program.s"
+let usage () =
+  let () = fprintf stderr "[compiler] Invalid args\n" in
+  let () =
+    fprintf stderr "[compiler] Usage: compiler <input-file> [-o <output-file>]\n"
+  in
+  exit 1
+;;
+
+let parse_args argv =
+  let argc = array_len argv in
+  let rec loop i input_opt output_opt =
+    if i >= argc
+    then input_opt, output_opt
+    else (
+      let arg = array_get argv i in
+      if string_equal arg "-o"
+      then
+        if i + 1 >= argc
+        then usage ()
+        else (
+          match output_opt with
+          | None -> loop (i + 2) input_opt (Some (array_get argv (i + 1)))
+          | Some _ -> usage ())
+      else (
+        match input_opt with
+        | None -> loop (i + 1) (Some arg) output_opt
+        | Some _ -> usage ()))
+  in
+  let input_opt, output_opt = loop 1 None None in
+  let input_path =
+    match input_opt with
+    | None -> usage ()
+    | Some s -> s
+  in
+  let output_path =
+    match output_opt with
+    | None -> "a.s"
+    | Some s -> s
+  in
+  input_path, output_path
+;;
 
 let main =
+  let input_path, output_path = parse_args sys_argv in
   let ic = open_in input_path in
   let oc = open_out output_path in
   let () = run_single_program oc (input_all ic) in

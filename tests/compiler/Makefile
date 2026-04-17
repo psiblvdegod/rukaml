@@ -21,7 +21,7 @@ compiler.exe: compiler.s
 
 # program.cpp ~> program.s   (via compiler)
 program.s: compiler.exe program.cpp
-	qemu-x86_64 _build/compiler.exe
+	qemu-x86_64 _build/compiler.exe program.cpp -o ./_build/program.s
 
 # program.s ~> program.exe   
 program.exe: program.s
