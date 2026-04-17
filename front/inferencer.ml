@@ -887,6 +887,10 @@ let start_env =
   let extend_binop name = extend_s ~kind:(Builtin (name, 2)) name in
   let extend_builtin name ~argc = extend_s ~kind:(Builtin (name, argc)) name in
   Type_env.env_with_base_types
+  |> extend_builtin
+       ~argc:1
+       "exit"
+       (Scheme.scheme (Var_set.singleton 0) (tarrow int_typ (tv 0 ~level:1000)))
   (* TODO: print_int *)
   |> extend_builtin ~argc:1 "print" (Scheme.make_mono (tarrow int_typ unit_typ))
   |> extend_builtin ~argc:1 "char_code" (Scheme.make_mono (tarrow char_typ int_typ))
@@ -899,6 +903,8 @@ let start_env =
   |> extend_builtin ~argc:0 "stdin" (Scheme.make_mono in_channel_typ)
   |> extend_builtin ~argc:0 "stdout" (Scheme.make_mono out_channel_typ)
   |> extend_builtin ~argc:0 "stderr" (Scheme.make_mono out_channel_typ)
+  (* Command line arguments *)
+  |> extend_builtin ~argc:0 "sys_argv" (Scheme.make_mono (array_typ string_typ))
   (* Stdio file access primitives *)
   |> extend_builtin
        ~argc:1
