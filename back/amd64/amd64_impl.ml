@@ -298,9 +298,42 @@ module Addr_of_var = struct
 
   (* resolves aliases *)
   let real_name_exn (ident : Ident.t) = (Toplevel.find_exn ident).name
+  let builtin_realname_exn (name : string) = (Toplevel.find_exn (Ident.ident name 0)).name
+
+  let resolve_primitive = function
+    | "printf" -> "rukaml_alloc_printf_closure"
+    | "fprintf" -> "rukaml_alloc_fprintf_closure"
+    | "sprintf" -> "rukaml_alloc_sprintf_closure"
+    | "string_len" -> "rukaml_string_len"
+    | "string_nth" -> "rukaml_string_nth"
+    | "string_equal" -> "rukaml_string_equal"
+    | "string_of_char_list" -> "rukaml_string_of_char_list"
+    | "array_len" -> "rukaml_block_size"
+    | "array_get" -> "rukaml_block_nth"
+    | "array_set" -> "rukaml_array_set"
+    | "block_nth" -> "rukaml_block_nth"
+    | "block_size" -> "rukaml_block_size"
+    | "block_tag" -> "rukaml_block_tag"
+    | "stdin" -> "rukaml_stdin"
+    | "stdout" -> "rukaml_stdout"
+    | "stderr" -> "rukaml_stderr"
+    | "end_of_input" -> "rukaml_end_of_input"
+    | "input_char" -> "rukaml_input_char"
+    | "gc_stats" -> "rukaml_gc_print_stats"
+    | "gc_compact" -> "rukaml_gc_compact"
+    | "open_in" -> "rukaml_open_in"
+    | "open_out" -> "rukaml_open_out"
+    | "close_in" -> "rukaml_close_channel"
+    | "close_out" -> "rukaml_close_channel"
+    | name ->
+      Format.eprintf "error: can not resolve %s" name;
+      raise Not_found
+  ;;
 end
 
-let is_builtin, real_name_exn = Addr_of_var.(is_builtin, real_name_exn)
+let is_builtin, real_name_exn, builtin_realname_exn =
+  Addr_of_var.(is_builtin, real_name_exn, builtin_realname_exn)
+;;
 
 let pp_dest ppf = function
   | DDiscard -> fprintf ppf "[rukaml_discard]"
@@ -432,13 +465,13 @@ let rec generate_body ppf body =
          | { kind = Main; _ } -> assert false
          | { kind = Immediate Eval; _ } -> assert false
          | { kind = Immediate Match; _ } -> assert false)
-      | AVar v when is_builtin v && real_name_exn v = "rukaml_stdin" ->
+      | APrimitive ("stdin", 0) ->
         printfn ppf "  call rukaml_stdin";
         printfn ppf "  mov qword [rsp%+d*8], rax" (count - 1 - i)
-      | AVar v when is_builtin v && real_name_exn v = "rukaml_stdout" ->
+      | APrimitive ("stdout", 0) ->
         printfn ppf "  call rukaml_stdout";
         printfn ppf "  mov qword [rsp%+d*8], rax" (count - 1 - i)
-      | AVar v when is_builtin v && real_name_exn v = "rukaml_stderr" ->
+      | APrimitive ("stderr", 0) ->
         printfn ppf "  call rukaml_stderr";
         printfn ppf "  mov qword [rsp%+d*8], rax" (count - 1 - i)
       | AVar vname ->
@@ -501,96 +534,88 @@ let rec generate_body ppf body =
       printfn ppf "%s:" el_lab;
       helper dest bel;
       printfn ppf "%s:" fin_lab
-    | CAtom (AVar f)
-    (* TODO? : should it be replaced with APrimitive *)
-      when is_builtin f && real_name_exn f = "rukaml_stdin" ->
+    | CAtom (APrimitive ("stdin", 0)) ->
       printfn ppf "  call rukaml_stdin";
       printfn ppf "  mov %a, rax" pp_dest dest
-    | CAtom (AVar f)
-    (* TODO? : should it be replaced with APrimitive *)
-      when is_builtin f && real_name_exn f = "rukaml_stdout" ->
+    | CAtom (APrimitive ("stdout", 0)) ->
       printfn ppf "  call rukaml_stdout";
       printfn ppf "  mov %a, rax" pp_dest dest
-    | CAtom (AVar f)
-    (* TODO? : should it be replaced with APrimitive *)
-      when is_builtin f && real_name_exn f = "rukaml_stderr" ->
+    | CAtom (APrimitive ("stderr", 0)) ->
       printfn ppf "  call rukaml_stderr";
       printfn ppf "  mov %a, rax" pp_dest dest
     | CApp (APrimitive ("print", 1), AVar arg, []) ->
       printfn ppf "  mov rdi, %a" Addr_of_var.pp_var_exn arg;
       printfn ppf "  call rukaml_print_int";
       printfn ppf "  mov %a, rax" pp_dest dest
-    | CApp (APrimitive ("block_tag", _), obj, []) ->
+    | CApp (APrimitive ("block_tag", 1), obj, []) ->
       helper_a (DReg "rsi") obj;
       printfn ppf "  mov rdi, rukaml_block_tag";
       printfn ppf "  call rukaml_apply1";
       printfn ppf "  mov %a, rax" pp_dest dest
-    | CApp (APrimitive ("block_size", _), obj, []) ->
+    | CApp (APrimitive ("block_size", 1), obj, []) ->
       helper_a (DReg "rsi") obj;
       printfn ppf "  mov rdi, rukaml_block_size";
       printfn ppf "  call rukaml_apply1";
       printfn ppf "  mov %a, rax" pp_dest dest
-    | CApp (APrimitive (("block_nth" | "field"), _), obj, [ AConst (PConst_int n) ]) ->
+    | CApp (APrimitive ("field", 2), AConst (PConst_int n), [ obj ])
+    | CApp (APrimitive ("block_nth", 2), obj, [ AConst (PConst_int n) ]) ->
       helper_a (DReg "rsi") obj;
       printfn ppf "  mov rdi, rukaml_block_nth";
       printfn ppf "  mov rdx, %d" n;
       printfn ppf "  call rukaml_apply2";
       printfn ppf "  mov %a, rax" pp_dest dest
-    | CApp (APrimitive (("block_nth" | "field"), _), obj, [ AVar v ])
+    | CApp (APrimitive ("field", 2), AVar v, [ obj ])
+    | CApp (APrimitive ("block_nth", 2), obj, [ AVar v ])
       when Addr_of_var.is_defined v ->
       helper_a (DReg "rsi") obj;
       printfn ppf "  mov rdi, rukaml_block_nth";
       printfn ppf "  mov rdx, %a" Addr_of_var.pp_var_exn v;
       printfn ppf "  call rukaml_apply2";
       printfn ppf "  mov %a, rax" pp_dest dest
-    | CApp (AVar fname, arg, [])
-      when is_builtin fname && real_name_exn fname = "rukaml_alloc_printf_closure" ->
+    (* >>> TODO: get rid of it *)
+    | CApp (APrimitive (("fprintf" as fname), (2 as argc)), arg1, []) ->
+      emit_rukaml_applyN dest ~fname ~arg1 ~argc
+    | CApp (APrimitive (("block_nth" as fname), (2 as argc)), arg1, []) ->
+      emit_rukaml_applyN dest ~fname ~arg1 ~argc
+    | CApp (APrimitive (("string_nth" as fname), (2 as argc)), arg1, []) ->
+      emit_rukaml_applyN dest ~fname ~arg1 ~argc
+    | CApp (APrimitive (("string_equal" as fname), (2 as argc)), arg1, []) ->
+      emit_rukaml_applyN dest ~fname ~arg1 ~argc
+    | CApp (APrimitive (("array_get" as fname), (2 as argc)), arg1, []) ->
+      emit_rukaml_applyN dest ~fname ~arg1 ~argc
+    (* <<< *)
+    | CApp (APrimitive (("printf" as fname), 1), arg, []) ->
       emit_rukaml_apply1 dest ~fname ~arg
-    | CApp (AVar fname, arg, [])
-      when is_builtin fname && real_name_exn fname = "rukaml_alloc_sprintf_closure" ->
+    | CApp (APrimitive (("sprintf" as fname), 1), arg, []) ->
       emit_rukaml_apply1 dest ~fname ~arg
-    | CApp (AVar fname, arg1, [])
-      when is_builtin fname && real_name_exn fname = "rukaml_alloc_fprintf_closure" ->
-      emit_rukaml_applyN dest ~fname ~argc:2 ~arg1
-    | CApp (AVar fname, arg, [])
-      when is_builtin fname && real_name_exn fname = "rukaml_string_len" ->
+    | CApp (APrimitive (("fprintf" as fname), 2), arg1, [ arg2 ]) ->
+      emit_rukaml_apply2 dest ~fname ~arg1 ~arg2
+    | CApp (APrimitive (("string_len" as fname), 1), arg, []) ->
       emit_rukaml_apply1 dest ~fname ~arg
-    | CApp (AVar fname, arg, [])
-      when is_builtin fname && real_name_exn fname = "rukaml_block_tag" ->
+    | CApp (APrimitive (("block_nth" as fname), 2), arg1, [ arg2 ]) ->
+      emit_rukaml_apply2 dest ~fname ~arg1 ~arg2
+    | CApp (APrimitive (("string_nth" as fname), 2), arg1, [ arg2 ]) ->
+      emit_rukaml_apply2 dest ~fname ~arg1 ~arg2
+    | CApp (APrimitive (("string_equal" as fname), 2), arg1, [ arg2 ]) ->
+      emit_rukaml_apply2 dest ~fname ~arg1 ~arg2
+    | CApp (APrimitive (("string_of_char_list" as fname), 1), arg, []) ->
+      emit_rukaml_apply1 dest ~arg ~fname
+    | CApp (APrimitive (("open_in" as fname), 1), arg, []) ->
+      emit_rukaml_apply1 dest ~arg ~fname
+    | CApp (APrimitive (("open_out" as fname), 1), arg, []) ->
+      emit_rukaml_apply1 dest ~arg ~fname
+    | CApp (APrimitive (("input_char" as fname), 1), arg, []) ->
+      emit_rukaml_apply1 dest ~arg ~fname
+    | CApp (APrimitive (("end_of_input" as fname), 1), arg, []) ->
+      emit_rukaml_apply1 dest ~arg ~fname
+    | CApp (APrimitive ((("close_in" | "close_out") as fname), 1), arg, []) ->
       emit_rukaml_apply1 dest ~fname ~arg
-    | CApp (AVar fname, arg, [])
-      when is_builtin fname && real_name_exn fname = "rukaml_block_size" ->
+    | CApp (APrimitive (("array_set" as fname), (3 as argc)), arg1, []) ->
+      emit_rukaml_applyN dest ~fname ~argc ~arg1
+    | CApp (APrimitive (("array_get" as fname), 2), arg1, [ arg2 ]) ->
+      emit_rukaml_apply2 dest ~fname ~arg1 ~arg2
+    | CApp (APrimitive (("array_len" as fname), 1), arg, []) ->
       emit_rukaml_apply1 dest ~fname ~arg
-    | CApp (AVar fname, arg1, [])
-      when is_builtin fname && real_name_exn fname = "rukaml_block_nth" ->
-      emit_rukaml_applyN dest ~fname ~argc:2 ~arg1
-    | CApp (AVar fname, arg1, [])
-      when is_builtin fname && real_name_exn fname = "rukaml_string_nth" ->
-      emit_rukaml_applyN dest ~fname ~argc:2 ~arg1
-    | CApp (AVar fname, arg1, [])
-      when is_builtin fname && real_name_exn fname = "rukaml_string_equal" ->
-      emit_rukaml_applyN dest ~fname ~argc:2 ~arg1
-    | CApp (AVar fname, arg, [])
-      when is_builtin fname && real_name_exn fname = "rukaml_string_of_char_list" ->
-      emit_rukaml_apply1 dest ~fname ~arg
-    | CApp (AVar fname, arg, [])
-      when is_builtin fname && real_name_exn fname = "rukaml_open_in" ->
-      emit_rukaml_apply1 dest ~fname ~arg
-    | CApp (AVar fname, arg, [])
-      when is_builtin fname && real_name_exn fname = "rukaml_open_out" ->
-      emit_rukaml_apply1 dest ~fname ~arg
-    | CApp (AVar fname, arg, [])
-      when is_builtin fname && real_name_exn fname = "rukaml_input_char" ->
-      emit_rukaml_apply1 dest ~fname ~arg
-    | CApp (AVar fname, arg, [])
-      when is_builtin fname && real_name_exn fname = "rukaml_end_of_input" ->
-      emit_rukaml_apply1 dest ~fname ~arg
-    | CApp (AVar fname, arg, [])
-      when is_builtin fname && real_name_exn fname = "rukaml_close_channel" ->
-      emit_rukaml_apply1 dest ~fname ~arg
-    | CApp (AVar fname, arg1, [])
-      when is_builtin fname && real_name_exn fname = "rukaml_array_set" ->
-      emit_rukaml_applyN dest ~fname ~argc:3 ~arg1
     | CApp (APrimitive ("char_code", 1), arg1, []) ->
       (match arg1 with
        | AVar v ->
@@ -823,13 +848,6 @@ let rec generate_body ppf body =
     | CApp (AVar f, (APrimitive _ as arg), [])
     | CApp (AVar f, (AVar _ as arg), [])
       when Addr_of_local.has_key f ->
-      let arg =
-        match arg with
-        (* TODO(Kakadu): change to builtin *)
-        | AVar id when id.Frontend.Ident.hum_name = "closure_count" ->
-          ANF.AConst (PConst_int 0)
-        | _ -> arg
-      in
       let arg1 = Ident.of_string "arg1" in
       let temp_padding = Ident.of_string "temp_padding" in
       Addr_of_local.extend temp_padding;
@@ -850,15 +868,15 @@ let rec generate_body ppf body =
       printfn ppf "  mov rdi, %d" n;
       printfn ppf "  call rukaml_print_int";
       printfn ppf "  mov qword %a, 0" pp_dest dest
-    | CApp (AVar id, AUnit, []) when id.Frontend.Ident.hum_name = "gc_compact" ->
+    | CApp (APrimitive ("gc_compact", 1), _, []) ->
       printfn ppf "  mov rdi, rsp";
       printfn ppf "  mov rsi, 0";
       printfn ppf "  call rukaml_gc_compact"
-    | CApp (AVar id, AUnit, []) when id.Frontend.Ident.hum_name = "gc_stats" ->
+    | CApp (APrimitive ("gc_stats", 1), _, []) ->
       printfn ppf "  mov rdi, 0";
       printfn ppf "  mov rsi, 0";
       printfn ppf "  call rukaml_gc_print_stats"
-    | CApp (AVar id, AUnit, []) when id.Frontend.Ident.hum_name = "closure_count" ->
+    | CApp (APrimitive ("closure_count", 1), _, []) ->
       printfn ppf "  mov rdi, 0";
       printfn ppf "  mov rsi, 0";
       printfn ppf "  call rukaml_print_alloc_closure_count"
@@ -927,13 +945,13 @@ let rec generate_body ppf body =
     | AVar ({ Ident.hum_name = "print"; _ } as v) when Addr_of_var.is_builtin v ->
       emit_alloc_closure ppf ~fname:(Ident.of_string "rukaml_print_int") ~argc:1;
       printfn ppf "  mov %a, rax" pp_dest dest
-    | AVar v when Addr_of_var.is_builtin v && Addr_of_var.real_name_exn v = "stdin" ->
+    | APrimitive ("stdin", 0) ->
       printfn ppf "  call rukaml_stdin";
       printfn ppf "  mov %a, rax" pp_dest dest
-    | AVar v when Addr_of_var.is_builtin v && Addr_of_var.real_name_exn v = "stdout" ->
+    | APrimitive ("stdout", 0) ->
       printfn ppf "  call rukaml_stdout";
       printfn ppf "  mov %a, rax" pp_dest dest
-    | AVar v when Addr_of_var.is_builtin v && Addr_of_var.real_name_exn v = "stderr" ->
+    | APrimitive ("stderr", 0) ->
       printfn ppf "  call rukaml_stderr";
       printfn ppf "  mov %a, rax" pp_dest dest
     | AVar vname when Addr_of_local.has_key vname ->
@@ -1014,6 +1032,12 @@ let rec generate_body ppf body =
       print_epilogue ppf (Format.asprintf "%a" Toplevel.pp_label_exn lam_name);
       emit_alloc_closure ppf ~fname:lam_name ~argc;
       printfn ppf "  mov %a, rax" pp_dest dest
+    | APrimitive ("closure_count", (1 as argc)) ->
+      emit_alloc_closure
+        ppf
+        ~fname:(Ident.ident "rukaml_print_alloc_closure_count" 0)
+        ~argc;
+      printfn ppf "  mov %a, rax" pp_dest dest
     | atom ->
       printfn ppf ";;; TODO %s %d" __FUNCTION__ __LINE__;
       failwiths "unsupported: %a" ANF.pp_a atom
@@ -1039,24 +1063,46 @@ let rec generate_body ppf body =
     Addr_of_local.remove_local name1;
     printfn ppf "  mov %a, rax" pp_dest dest
   and emit_rukaml_apply1 dest ~fname ~arg =
-    assert (Toplevel.is_toplevel_function fname || Addr_of_var.is_builtin fname);
+    let fname = Addr_of_var.resolve_primitive fname in
     match arg with
     | ANF.AVar v when Addr_of_var.is_defined v ->
-      printfn ppf "  mov rdi, %a" Toplevel.pp_label_exn fname;
+      printfn ppf "  mov rdi, %s" fname;
       printfn ppf "  mov rsi, %a" Addr_of_var.pp_var_exn v;
       printfn ppf "  call rukaml_apply1";
       printfn ppf "  mov %a, rax" pp_dest dest
     | _ ->
       helper_a (DReg "rsi") arg;
-      printfn ppf "  mov rdi, %a" Toplevel.pp_label_exn fname;
+      printfn ppf "  mov rdi, %s" fname;
       printfn ppf "  call rukaml_apply1";
       printfn ppf "  mov %a, rax" pp_dest dest
+  and emit_rukaml_apply2 dest ~fname ~arg1 ~arg2 =
+    let fname = Addr_of_var.resolve_primitive fname in
+    (match arg1, arg2 with
+     | ANF.AVar v1, ANF.AVar v2 ->
+       printfn ppf "  mov rsi, %a" Addr_of_var.pp_var_exn v1;
+       printfn ppf "  mov rdx, %a" Addr_of_var.pp_var_exn v2
+     | ANF.AVar v1, _ ->
+       helper_a (DReg "rdx") arg2;
+       printfn ppf "  mov rsi, %a" Addr_of_var.pp_var_exn v1
+     | _, ANF.AVar v2 ->
+       helper_a (DReg "rsi") arg1;
+       printfn ppf "  mov rdx, %a" Addr_of_var.pp_var_exn v2
+     | _ ->
+       helper_a (DReg "rsi") arg1;
+       printfn ppf "  add rsp, -8*2";
+       printfn ppf "  mov qword [rsp], rsi";
+       helper_a (DReg "rdx") arg2;
+       printfn ppf "  mov qword rsi, [rsp]";
+       printfn ppf "  add rsp, 8*2");
+    printfn ppf "  mov rdi, %s" fname;
+    printfn ppf "  call rukaml_apply1";
+    printfn ppf "  mov %a, rax" pp_dest dest
   and emit_rukaml_applyN dest ~fname ~argc ~arg1 =
-    assert (Toplevel.is_toplevel_function fname || Addr_of_var.is_builtin fname);
+    let fname = Addr_of_var.resolve_primitive fname in
     assert (argc > 1);
     match arg1 with
     | ANF.AVar v when Addr_of_var.is_defined v ->
-      printfn ppf "  mov rdi, %a" Toplevel.pp_label_exn fname;
+      printfn ppf "  mov rdi, %s" fname;
       printfn ppf "  mov rsi, %d" argc;
       printfn ppf "  call rukaml_alloc_closure";
       printfn ppf "  mov rdi, rax";
@@ -1066,7 +1112,7 @@ let rec generate_body ppf body =
       printfn ppf "  call rukaml_applyN";
       printfn ppf "  mov %a, rax" pp_dest dest
     | _ ->
-      printfn ppf "  mov rdi, %a" Toplevel.pp_label_exn fname;
+      printfn ppf "  mov rdi, %s" fname;
       printfn ppf "  mov rsi, %d" argc;
       printfn ppf "  call rukaml_alloc_closure";
       let name1 = Ident.of_string @@ gen_name ~prefix:"pad" () in
@@ -1154,8 +1200,8 @@ let stdlib_externs =
   ; 0, "rukaml_match_failure"
   ; 1, "rukaml_initialize"
   ; 1, "rukaml_gc_compact"
-  ; 0, "rukaml_gc_print_stats"
-  ; 0, "rukaml_print_alloc_closure_count"
+  ; 1, "rukaml_gc_print_stats"
+  ; 1, "rukaml_print_alloc_closure_count"
   ; 7, "rukaml_alloc_printf_closure"
   ; 8, "rukaml_alloc_fprintf_closure"
   ; 7, "rukaml_alloc_sprintf_closure"
@@ -1199,6 +1245,7 @@ let stdlib_aliases =
   ; "input_char", "rukaml_input_char"
   ; "gc_stats", "rukaml_gc_print_stats"
   ; "gc_compact", "rukaml_gc_compact"
+  ; "closure_count", "rukaml_print_alloc_closure_count"
   ; "open_in", "rukaml_open_in"
   ; "open_out", "rukaml_open_out"
   ; "close_in", "rukaml_close_channel"
