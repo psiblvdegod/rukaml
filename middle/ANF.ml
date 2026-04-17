@@ -307,7 +307,9 @@ let substitute ~where ident1 (rhs : c_expr) : expr =
   and helperi = function
     | AConst (PConst_bool true) -> AConst (PConst_int 1)
     | AConst (PConst_bool false) -> AConst (PConst_int 0)
-    | (ATuple _ | APrimitive _ | AConst _ | AUnit) as i -> i
+    | (APrimitive _ | AConst _ | AUnit) as i -> i
+    | ATuple (i1, i2, is) -> ATuple (helperi i1, helperi i2, List.map helperi is)
+    | AArray is -> AArray (List.map helperi is)
     | AConstruct (tag, is) -> AConstruct (tag, List.map helperi is)
     | AVar name when Ident.equal ident1 name ->
       Format.eprintf "Possible missing substitution. %s %d\n%!" __FILE__ __LINE__;
