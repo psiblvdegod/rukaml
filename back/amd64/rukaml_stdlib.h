@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-void rukaml_initialize(uint64_t ebp);
+void rukaml_initialize(uint64_t ebp, int argc, char **argv);
 
 void dfs(uint64_t *allocated, uint64_t *root);
 
@@ -74,5 +74,7 @@ void *rukaml_alloc_pair(void *l, void *r);
 void *rukaml_alloc_closure(void *func, int32_t argsc);
 
 void *rukaml_applyN(void *f, int64_t argc, ...);
+
+void *rukaml_argv(void);
 
 #endif // RUKAML_STDLIB_H

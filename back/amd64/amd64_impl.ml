@@ -317,6 +317,7 @@ module Addr_of_var = struct
     | "stdin" -> "rukaml_stdin"
     | "stdout" -> "rukaml_stdout"
     | "stderr" -> "rukaml_stderr"
+    | "sys_argv" -> "rukaml_argv"
     | "end_of_input" -> "rukaml_end_of_input"
     | "input_char" -> "rukaml_input_char"
     | "gc_stats" -> "rukaml_gc_print_stats"
@@ -474,6 +475,9 @@ let rec generate_body ppf body =
       | APrimitive ("stderr", 0) ->
         printfn ppf "  call rukaml_stderr";
         printfn ppf "  mov qword [rsp%+d*8], rax" (count - 1 - i)
+      | APrimitive ("sys_argv", 0) ->
+        printfn ppf "  call rukaml_argv";
+        printfn ppf "  mov qword [rsp%+d*8], rax" (count - 1 - i)
       | AVar vname ->
         printfn
           ppf
@@ -543,6 +547,14 @@ let rec generate_body ppf body =
     | CAtom (APrimitive ("stderr", 0)) ->
       printfn ppf "  call rukaml_stderr";
       printfn ppf "  mov %a, rax" pp_dest dest
+    | CApp (APrimitive ("exit", 1), AVar arg, []) ->
+      printfn ppf "  mov rdi, %a" Addr_of_var.pp_var_exn arg;
+      printfn ppf "  mov rax, 60 ; syscall exit";
+      printfn ppf "  syscall"
+    | CApp (APrimitive ("exit", 1), AConst (PConst_int n), []) ->
+      printfn ppf "  mov rdi, %d" n;
+      printfn ppf "  mov rax, 60 ; syscall exit";
+      printfn ppf "  syscall"
     | CApp (APrimitive ("print", 1), AVar arg, []) ->
       printfn ppf "  mov rdi, %a" Addr_of_var.pp_var_exn arg;
       printfn ppf "  call rukaml_print_int";
@@ -954,6 +966,9 @@ let rec generate_body ppf body =
     | APrimitive ("stderr", 0) ->
       printfn ppf "  call rukaml_stderr";
       printfn ppf "  mov %a, rax" pp_dest dest
+    | APrimitive ("sys_argv", 0) ->
+      printfn ppf "  call rukaml_argv";
+      printfn ppf "  mov %a, rax" pp_dest dest
     | AVar vname when Addr_of_local.has_key vname ->
       printfn
         ppf
@@ -1198,7 +1213,7 @@ let stdlib_externs =
   ; 7, "rukaml_block_tag"
   ; 8, "rukaml_block_nth"
   ; 0, "rukaml_match_failure"
-  ; 1, "rukaml_initialize"
+  ; 3, "rukaml_initialize"
   ; 1, "rukaml_gc_compact"
   ; 1, "rukaml_gc_print_stats"
   ; 1, "rukaml_print_alloc_closure_count"
@@ -1221,6 +1236,7 @@ let stdlib_externs =
   ; 7, "rukaml_close_channel"
   ; 7, "rukaml_end_of_input"
   ; 7, "rukaml_input_char"
+  ; 0, "rukaml_argv"
   ]
 ;;
 
@@ -1250,6 +1266,7 @@ let stdlib_aliases =
   ; "open_out", "rukaml_open_out"
   ; "close_in", "rukaml_close_channel"
   ; "close_out", "rukaml_close_channel"
+  ; "sys_argv", "rukaml_argv"
   ]
 ;;
 
@@ -1391,10 +1408,16 @@ let emit_global_function ppf name body =
     printfn ppf "  mov  rbp, rsp";
     if Toplevel.is_main name
     then (
-      printfn ppf "  mov rdi, rsp";
+      (* >>> TODO!!! : REWRITE THIS GARBAGE (move it to _start) *)
+      printfn ppf "  push rdi          ; save argc";
+      printfn ppf "  push rsi          ; save argv";
+      printfn ppf "  mov rdi, rsp      ; ebp  (for gc initialization)";
+      printfn ppf "  mov rsi, [rsp+8]  ; argc (for Sys.argv initialization)";
+      printfn ppf "  mov rdx, [rsp]    ; argv (for Sys.argv initialization)";
       printfn ppf "  call rukaml_initialize";
-      (* TODO: maybe immediates should not be here *)
-      printfn ppf "  call rukaml_init_global_immediates");
+      printfn ppf "  call rukaml_init_global_immediates";
+      printfn ppf "  pop rsi           ; pass argv to main";
+      printfn ppf "  pop rdi           ; pass argc to main" (* <<< *));
     generate_body ppf body;
     Addr_of_local.remove_args names;
     print_epilogue ppf (Format.asprintf "%a" Toplevel.pp_label_exn name))
@@ -1437,16 +1460,16 @@ let codegen ?(wrap_main_into_start = true) anf file =
       printfn
         ppf
         {|
-        section .text
-        _start:
-              push    rbp
-              mov     rbp, rsp   ; prologue
-              push 5
-              call sq
-              add rsp, 8
-              mov rdi, rax    ; rdi stores return code
-              mov rax, 60     ; exit syscall
-              syscall|}
+section .text
+    _start:
+          push    rbp
+          mov     rbp, rsp   ; prologue
+          push 5
+          call sq
+          add rsp, 8
+          mov rdi, rax    ; rdi stores return code
+          mov rax, 60     ; exit syscall
+          syscall|}
     else if wrap_main_into_start
     then
       printfn
