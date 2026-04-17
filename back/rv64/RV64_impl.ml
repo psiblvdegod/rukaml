@@ -397,19 +397,19 @@ let generate_body is_toplevel body =
            emit_alloc_closure vname.hum_name arity;
            emit sd a0 (ROffset (SP, 8 * i))
          | _ -> assert false)
-      | AVar { Ident.hum_name = "char_code"; _ } ->
+      | APrimitive ("char_code", 1) ->
         emit_alloc_closure "rukaml_identity" 1;
         (* Result is in a0 *)
         emit sd a0 (ROffset (SP, 8 * i))
-      | AVar { Ident.hum_name = "array_len"; _ } ->
+      | APrimitive ("array_len", 1) ->
         emit_alloc_closure "rukaml_array_length" 1;
         (* Result is in a0 *)
         emit sd a0 (ROffset (SP, 8 * i))
-      | AVar { Ident.hum_name = "array_get"; _ } ->
+      | APrimitive ("array_get", 2) ->
         emit_alloc_closure "rukaml_array_get" 2;
         (* Result is in a0 *)
         emit sd a0 (ROffset (SP, 8 * i))
-      | AVar { Ident.hum_name = "array_set"; _ } ->
+      | APrimitive ("array_set", 3) ->
         emit_alloc_closure "rukaml_array_set" 3;
         (* Result is in a0 *)
         emit sd a0 (ROffset (SP, 8 * i))
@@ -499,10 +499,7 @@ let generate_body is_toplevel body =
       emit label lab_then;
       helper dest bthen;
       emit label lab_fin
-    | CApp (AVar f, arg1, [])
-      when f.Ident.hum_name = "char_code"
-           && is_toplevel f = `External
-           && not (Addr_of_local.has_key f) ->
+    | CApp (APrimitive ("char_code", 1), arg1, []) ->
       (match arg1 with
        | AVar v when Addr_of_local.has_key v ->
          emit ld t0 (pp_to_mach v);
@@ -511,7 +508,7 @@ let generate_body is_toplevel body =
          emit li t0 (Char.code c);
          emit sd_dest t0 dest
        | _ -> failwith "Should not happen: char_code")
-    | CAtom (AVar f)
+    (* | CAtom (AVar f)
       when f.Ident.hum_name = "stdin"
            && is_toplevel f = `External
            && not (Addr_of_local.has_key f) ->
@@ -542,7 +539,7 @@ let generate_body is_toplevel body =
            emit ld ra (pp_to_mach ra_name);
            emit sd_dest a0 dest;
            emit addi SP SP 16)
-       | _ -> failwith "Should not happen: open_in")
+       | _ -> failwith "Should not happen: open_in") *)
     | CApp (APrimitive ("print", 1), arg1, []) ->
       (match arg1 with
        | AVar v when Addr_of_local.has_key v ->
@@ -557,10 +554,7 @@ let generate_body is_toplevel body =
        | ATuple (_, _, _)
        | ALam (_, _)
        | AUnit -> failwith "Should not happen: print_int")
-    | CApp (AVar f, arg1, [])
-      when f.Ident.hum_name = "array_len"
-           && is_toplevel f = `External
-           && not (Addr_of_local.has_key f) ->
+    | CApp (APrimitive ("array_len", 1), arg1, []) ->
       (match arg1 with
        | AVar v when Addr_of_local.has_key v ->
          with_two_slots (fun ra_name arg_name ->
@@ -573,10 +567,7 @@ let generate_body is_toplevel body =
            emit sd_dest a0 dest;
            emit addi SP SP 16)
        | AArray _ | _ -> failwith "Should not happen")
-    | CApp (AVar f, arg1, [])
-      when f.Ident.hum_name = "array_get"
-           && is_toplevel f = `External
-           && not (Addr_of_local.has_key f) ->
+    | CApp (APrimitive ("array_get", 2), arg1, []) ->
       (match arg1 with
        | AVar arr when Addr_of_local.has_key arr ->
          emit_alloc_closure "rukaml_array_get" 2;
@@ -585,10 +576,28 @@ let generate_body is_toplevel body =
          emit call "rukaml_applyN";
          emit sd_dest a0 dest
        | _ -> failwith "Should not happen")
-    | CApp (AVar f, arg1, [])
-      when f.Ident.hum_name = "array_set"
-           && is_toplevel f = `External
-           && not (Addr_of_local.has_key f) ->
+    | CApp (APrimitive ("array_get", 2), arg1, [ arg2 ]) ->
+      (match arg1 with
+       | AVar arr when Addr_of_local.has_key arr -> emit ld a0 (pp_to_mach arr)
+       | _ -> failwith "Should not happen");
+      (match arg2 with
+       | AVar v when Addr_of_local.has_key v -> emit ld a1 (pp_to_mach v)
+       | AConst (PConst_int n) -> emit li a1 n
+       | _ -> failwith "Should not happen");
+      emit call "rukaml_block_get_imm";
+      emit sd_dest a0 dest
+    | CApp (APrimitive ("array_set", 3), arg1, [ arg2; arg3 ]) ->
+      helper_a (DReg "a2") arg3;
+      (match arg1 with
+       | AVar arr when Addr_of_local.has_key arr -> emit ld a0 (pp_to_mach arr)
+       | _ -> failwith "Should not happen");
+      (match arg2 with
+       | AVar v -> emit ld a1 (pp_to_mach v)
+       | AConst (PConst_int n) -> emit li a1 n
+       | _ -> failwith "Should not happen");
+      emit call "rukaml_block_set_imm";
+      emit sd_dest a0 dest
+    | CApp (APrimitive ("array_set", 3), arg1, []) ->
       (match arg1 with
        | AVar arr when Addr_of_local.has_key arr ->
          emit_alloc_closure "rukaml_array_set" 3;
@@ -683,15 +692,27 @@ let generate_body is_toplevel body =
            dealloc_var ppf left_name *)
     | CApp (APrimitive ("-", 2), AVar vname, [ AConst (PConst_int n) ]) ->
       (match is_toplevel vname with
-       | `External ->
+       | `Local ->
          emit ld t5 (pp_to_mach vname);
          (* printfn ppf "  ld t5, %a #" Addr_of_local.pp_local_exn vname; *)
          emit addi t5 t5 (-n);
          (* printfn ppf "  addi t5, t5, -%d" n; *)
          (* printfn ppf "  sd t5, %a" Addr_of_local.pp_dest dest *)
          emit sd_dest t5 dest
-       | _ ->
+       | dk ->
          (* TODO: This will be fixed when we will allow toplevel non-functional constants *)
+         log "def_kind=%a" pp_def_kind dk;
+         failwiths "not implemented %d" __LINE__)
+    | CApp (APrimitive ("-", 2), AConst (PConst_int n), [ AVar vname ]) ->
+      (match is_toplevel vname with
+       | `Local ->
+         emit li t0 n;
+         emit ld t1 (pp_to_mach vname);
+         emit add t0 t0 t1;
+         emit sd_dest t0 dest
+       | dk ->
+         (* TODO: This will be fixed when we will allow toplevel non-functional constants *)
+         log "def_kind=%a" pp_def_kind dk;
          failwiths "not implemented %d" __LINE__)
     | CApp (APrimitive ((("+" | "*") as prim), _), AVar vname, [ AConst (PConst_int n) ])
     | CApp (APrimitive ((("+" | "*") as prim), _), AConst (PConst_int n), [ AVar vname ])
@@ -716,8 +737,8 @@ let generate_body is_toplevel body =
          failwiths "not implemented %d" __LINE__)
     | CApp (APrimitive (">=", info), vl, [ vr ]) ->
       helper_c dest (ANF.CApp (ANF.APrimitive ("<=", info), vr, [ vl ]))
-    | CApp (APrimitive (("<=" as prim), _), AVar vl, [ AVar vr ]) ->
-      with_two_slots (fun _ slot1 ->
+    | CApp (APrimitive ("<=", _), AVar vl, [ AVar vr ]) ->
+      with_two_slots (fun _ _slot1 ->
         emit ld t0 (Addr_of_local.pp_to_mach vl);
         emit ld t1 (Addr_of_local.pp_to_mach vr);
         emit addi t1 t1 1;
@@ -863,9 +884,6 @@ let generate_body is_toplevel body =
       emit ld a0 (pp_to_mach arg);
       emit call "rukaml_string_len";
       emit sd_dest a0 dest
-    | CApp (APrimitive ("char_code", 1), AVar arg, []) ->
-      emit ld t0 (pp_to_mach arg);
-      emit sd_dest t0 dest
     | CApp (APrimitive ("fprintf", 1), AVar arg, []) ->
       emit ld a0 (pp_to_mach arg);
       emit call "rukaml_alloc_fprintf_closure";
@@ -1113,6 +1131,8 @@ let codegen ?(wrap_main_into_start = true) anf file =
         ; "rukaml_initialize"
         ; "rukaml_gc_compact"
         ; "rukaml_gc_print_stats"
+        ; "rukaml_block_set_imm"
+        ; "rukaml_block_get_imm"
         ];
       printfn ppf ""
     in
