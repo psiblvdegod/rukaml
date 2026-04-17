@@ -449,6 +449,22 @@ void *rukaml_field(int n, void **r)
   return r[n];
 }
 
+void rukaml_block_set_imm(void **obj, uint64_t pos, void *item)
+{
+  // TODO:
+  //   assert(IS_BLOCK(obj));
+  //   assert(pos < SIZE(obj));
+  obj[pos] = item;
+}
+
+void *rukaml_block_get_imm(void **obj, uint64_t pos)
+{
+  // TODO:
+  //   assert(IS_BLOCK(obj));
+  //   assert(pos < SIZE(obj));
+  return obj[pos];
+}
+
 /* int64_t myadd(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t a, int64_t b)
 {
   printf("a = %ld, b = %ld\n", a, b);
