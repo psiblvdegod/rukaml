@@ -121,17 +121,16 @@ type pexpression =
   | Pexpr_tern of pexpression * pexpression * pexpression
   | Pexpr_assign of string * pexpression
 
-(* TODO: should pvar_decl be replaced with pstatement ?? *)
-type pvar_decl = ptype * (string * pexpression option) list
+type pdecl = Pdecl_var of ptype * (string * pexpression option) list
 
 type pstatement =
   | Pstmt_return of pexpression option
   | Pstmt_expr of pexpression
   | Pstmt_block of pstatement list
-  | Pstmt_decl of pvar_decl
+  | Pstmt_decl of pdecl
   | Pstmt_ite of pexpression * pstatement * pstatement option
   | Pstmt_for of
-      pvar_decl option * pexpression option * pexpression option * pstatement option
+      pdecl option * pexpression option * pexpression option * pstatement option
 
 type pprogram_item =
   | Pitem_function of string * ptype * (ptype * string) list * pstatement list
@@ -215,19 +214,21 @@ let rec pp_pexpr oc e =
   | Pexpr_tern (c, t, e) -> fprintf oc "%a ? %a : %a" pp_pexpr c pp_pexpr t pp_pexpr e
 ;;
 
-let pp_decl oc (ty, vbs) =
+let pp_decl oc decl =
   let pp_vb oc (name, expr_opt) =
     match expr_opt with
     | None -> fprintf oc "%s" name
     | Some expr -> fprintf oc "%s = %a" name pp_pexpr expr
   in
-  let () = fprintf oc "%a " pp_ptype ty in
-  match vbs with
-  | [] -> failwith "should not happen"
-  | [ vb ] -> pp_vb oc vb
-  | vb1 :: vbs ->
-    let () = pp_vb oc vb1 in
-    fprintf oc "%a" (pp_list pp_vb ", ") vbs
+  match decl with
+  | Pdecl_var (ty, vbs) ->
+    let () = fprintf oc "%a " pp_ptype ty in
+    (match vbs with
+     | [] -> failwith "should not happen"
+     | [ vb ] -> pp_vb oc vb
+     | vb1 :: vbs ->
+       let () = pp_vb oc vb1 in
+       fprintf oc "%a" (pp_list pp_vb ", ") vbs)
 ;;
 
 let rec pp_pstmt oc stmt =
@@ -547,7 +548,9 @@ let parse_decl =
   in
   bind (skip_ws parse_type) (fun t ->
     bind parse_single_var (fun v1 ->
-      map (many (drop_left (skip_ws (char ',')) parse_single_var)) (fun vs -> t, v1 :: vs)))
+      map
+        (many (drop_left (skip_ws (char ',')) parse_single_var))
+        (fun vs -> Pdecl_var (t, v1 :: vs))))
 ;;
 
 let parse_stmt_return =
@@ -590,20 +593,22 @@ let parse_stmt_for parse_stmt =
     (drop_left
        (skip_ws (char '('))
        (bind (option parse_decl) (fun decl_opt ->
-          bind (option parse_expression) (fun cond_opt ->
-            drop_left
-              (skip_ws (char ';'))
-              (bind
-                 (option (parse_expr_assign parse_expression))
-                 (fun iter_opt ->
-                    drop_left
-                      (skip_ws (char ')'))
-                      (map
-                         (choice2
-                            (map parse_stmt (fun body -> Some body))
-                            (drop_left (skip_ws (char ';')) (return None)))
-                         (fun body_opt ->
-                            Pstmt_for (decl_opt, cond_opt, iter_opt, body_opt)))))))))
+          drop_left
+            (skip_ws (char ';'))
+            (bind (option parse_expression) (fun cond_opt ->
+               drop_left
+                 (skip_ws (char ';'))
+                 (bind
+                    (option (parse_expr_assign parse_expression))
+                    (fun iter_opt ->
+                       drop_left
+                         (skip_ws (char ')'))
+                         (map
+                            (choice2
+                               (map parse_stmt (fun body -> Some body))
+                               (drop_left (skip_ws (char ';')) (return None)))
+                            (fun body_opt ->
+                               Pstmt_for (decl_opt, cond_opt, iter_opt, body_opt))))))))))
 ;;
 
 let parse_stmt_block parse_stmt =
@@ -676,16 +681,24 @@ let sizeof_ctype ptype =
 
 (* C0 like implementation (every var gets it's own place in vars pool) *)
 let eval_locals_pool_size stms =
-  let eval_decl (ty, vars) = sizeof_ctype ty * list_length vars in
+  let eval_opt eval opt =
+    match opt with
+    | None -> 0
+    | Some x -> eval x
+  in
+  let eval_decl decl =
+    match decl with
+    | Pdecl_var (ty, vars) -> sizeof_ctype ty * list_length vars
+  in
   let rec aux stm =
     match stm with
     | Pstmt_decl decl -> eval_decl decl
-    | Pstmt_ite (_, th, None) -> aux th
-    | Pstmt_ite (_, th, Some el) -> aux th + aux el
-    | Pstmt_for (None, _, _, None) -> 0
-    | Pstmt_for (Some decl, _, _, None) -> eval_decl decl
-    | Pstmt_for (None, _, _, Some body) -> aux body
-    | Pstmt_for (Some decl, _, _, Some body) -> eval_decl decl + aux body
+    | Pstmt_ite (_, th, el_opt) -> aux th + eval_opt aux el_opt
+    (* TODO !!! : typechecker fails here 
+    | Pstmt_for (decl_opt, _, _, body_opt) ->
+      eval_opt eval_decl decl_opt + eval_opt aux body_opt *)
+    | Pstmt_for (Some decl, _, _, body_opt) -> eval_decl decl + eval_opt aux body_opt
+    | Pstmt_for (None, _, _, body_opt) -> eval_opt aux body_opt
     | Pstmt_block stms -> list_fold (fun acc stm -> acc + aux stm) stms 0
     | Pstmt_return _ -> 0
     | Pstmt_expr _ -> 0
@@ -848,21 +861,23 @@ let rec codegen_expr oc expr =
     fprintf oc "  sd a0, %a\n" pp_local_var var
 ;;
 
-let codegen_decl oc (ty, vbs) =
-  let tysize = sizeof_ctype ty in
-  let rec aux vbs =
-    match vbs with
-    | [] -> ()
-    | (name, rhs_opt) :: vbs ->
-      let offset = get_offset_for_new_var tysize in
-      let () = add_to_scope (name, offset) in
-      (match rhs_opt with
-       | Some expr ->
-         let () = codegen_expr oc expr in
-         fprintf oc "  sd a0, %a\n" pp_local_var name
-       | None -> ())
-  in
-  aux vbs
+let codegen_decl oc decl =
+  match decl with
+  | Pdecl_var (ty, vbs) ->
+    let tysize = sizeof_ctype ty in
+    let rec aux vbs =
+      match vbs with
+      | [] -> ()
+      | (name, rhs_opt) :: vbs ->
+        let offset = get_offset_for_new_var tysize in
+        let () = add_to_scope (name, offset) in
+        (match rhs_opt with
+         | Some expr ->
+           let () = codegen_expr oc expr in
+           fprintf oc "  sd a0, %a\n" pp_local_var name
+         | None -> ())
+    in
+    aux vbs
 ;;
 
 let rec codegen_statement oc epilogue stmt =
@@ -904,8 +919,8 @@ let rec codegen_statement oc epilogue stmt =
     let () = fprintf oc "%s:\n" loop_label in
     let () = call_option (codegen_expr oc) cond_opt in
     let () = call_option (fun _ -> fprintf oc "  beqz a0, %s\n" end_label) cond_opt in
-    let () = call_option (codegen_expr oc) iter_opt in
     let () = call_option (codegen_statement oc epilogue) body_opt in
+    let () = call_option (codegen_expr oc) iter_opt in
     let () = fprintf oc "  j %s\n" loop_label in
     let () = fprintf oc "%s:\n" end_label in
     ()
