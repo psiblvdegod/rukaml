@@ -1,20 +1,26 @@
-int five()
+int fact_rec(int n)
 {
-    int x = 3;
-    x = x + 2;
-    return x;
+    if (n < 1)
+    {
+        return 1;
+    }
+
+    return n * fact_rec(n - 1);
 }
 
-int seven()
+int fact_iter(int n)
 {
-    int x = 4;
-    int z = x + 1;
-    return z + 2;
+    int acc = 1;
+
+    for (int i = 2; i <= n; i = i + 1)
+    {
+        acc = acc * i;
+    }
+
+    return acc;
 }
 
 int main()
 {
-    int f = five();
-    int s = seven();
-    return f + s;
+    return 144 - fact_rec(4) - fact_iter(5);
 }
