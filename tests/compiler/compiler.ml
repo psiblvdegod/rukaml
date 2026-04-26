@@ -5,10 +5,12 @@
 let string_of_char_list chs = String.of_seq (List.to_seq chs)
 let string_len s = String.length s
 let string_nth s n = s.[n]
+let string_equal = String.equal
 let char_code = Char.code
 let printf, fprintf, sprintf = Stdlib.Printf.(printf, fprintf, sprintf)
 let array_get = Array.get
 let array_set = Array.set
+let array_len = Array.length
 let list_length = List.length
 let sys_argv = Sys.argv
 
@@ -21,6 +23,11 @@ let end_of_input ic =
 ;;
 
 (* [end skip] *)
+
+let failwith msg =
+  let () = fprintf stderr "[compiler] error: %s \n" msg in
+  exit 1
+;;
 
 (* list primitives *)
 
@@ -88,130 +95,193 @@ type 'a option =
   | Some of 'a
   | None
 
-type cpp_type =
-  | CType_int
-  | CType_void
+type ptype =
+  | Ptype_int
+  | Ptype_void
 
-type cpp_binop =
-  | Cpp_add
-  | Cpp_sub
-  | Cpp_mul
-  | Cpp_div
-  | Cpp_eq
-  | Cpp_ne
-  | Cpp_lt
-  | Cpp_gt
-  | Cpp_le
-  | Cpp_ge
-  | Cpp_land
-  | Cpp_lor
+type pbinop =
+  | Pbinop_add
+  | Pbinop_sub
+  | Pbinop_mul
+  | Pbinop_div
+  | Pbinop_eq
+  | Pbinop_ne
+  | Pbinop_lt
+  | Pbinop_gt
+  | Pbinop_le
+  | Pbinop_ge
+  | Pbinop_and
+  | Pbinop_or
 
-type cpp_expression =
-  | CExpr_int of int
-  | CExpr_var of string
-  | CExpr_call of string * cpp_expression list
-  | CExpr_binop of cpp_binop * cpp_expression * cpp_expression
-  | CExpr_tern of cpp_expression * cpp_expression * cpp_expression
-  | CExpr_assign of string * cpp_expression
+type pexpression =
+  | Pexpr_int of int
+  | Pexpr_var of string
+  | Pexpr_call of string * pexpression list
+  | Pexpr_binop of pbinop * pexpression * pexpression
+  | Pexpr_tern of pexpression * pexpression * pexpression
+  | Pexpr_assign of string * pexpression
 
-type cpp_statement =
-  | CStmt_return of cpp_expression option
-  | CStmt_expr of cpp_expression
-  | CStmt_block of cpp_statement list
-  | CStmt_decl of cpp_type * string * cpp_expression option
+(* TODO: should pvar_decl be replaced with pstatement ?? *)
+type pvar_decl = ptype * (string * pexpression option) list
 
-type cpp_function =
-  | CFunction of string * cpp_type * (cpp_type * string) list * cpp_statement list
+type pstatement =
+  | Pstmt_return of pexpression option
+  | Pstmt_expr of pexpression
+  | Pstmt_block of pstatement list
+  | Pstmt_decl of pvar_decl
+  | Pstmt_ite of pexpression * pstatement * pstatement option
+  | Pstmt_for of
+      pvar_decl option * pexpression option * pexpression option * pstatement option
 
-type cpp_program = cpp_function list
+type pprogram_item =
+  | Pitem_function of string * ptype * (ptype * string) list * pstatement list
+
+type pprogram = pprogram_item list
 
 let is_cpp_keyword s =
   match s with
   | "int" -> true
   | "void" -> true
+  | "if" -> true
+  | "else" -> true
+  | "for" -> true
+  | "while" -> true
   | _ -> false
 ;;
 
 (* ast printer *)
 
-let pp_cpp_type oc t =
+let pp_option pp_item oc t =
   match t with
-  | CType_int -> fprintf oc "int"
-  | CType_void -> fprintf oc "void"
+  | None -> ()
+  | Some item -> pp_item oc item
 ;;
 
-let pp_cpp_binop oc op =
+let pp_list pp_item sep oc t =
+  match t with
+  | [] -> ()
+  | x1 :: xs ->
+    let rec loop oc ls =
+      match ls with
+      | [] -> ()
+      | x1 :: xs ->
+        let () = fprintf oc "%s%a" sep pp_item x1 in
+        loop oc xs
+    in
+    fprintf oc "%a%s%a" pp_item x1 sep loop xs
+;;
+
+let pp_ptype oc t =
+  match t with
+  | Ptype_int -> fprintf oc "int"
+  | Ptype_void -> fprintf oc "void"
+;;
+
+let pp_pbinop oc op =
   match op with
-  | Cpp_add -> fprintf oc "+"
-  | Cpp_sub -> fprintf oc "-"
-  | Cpp_mul -> fprintf oc "*"
-  | Cpp_div -> fprintf oc "/"
-  | Cpp_eq -> fprintf oc "=="
-  | Cpp_ne -> fprintf oc "!="
-  | Cpp_lt -> fprintf oc "<"
-  | Cpp_gt -> fprintf oc ">"
-  | Cpp_le -> fprintf oc "<="
-  | Cpp_ge -> fprintf oc ">="
-  | Cpp_land -> fprintf oc "&&"
-  | Cpp_lor -> fprintf oc "||"
+  | Pbinop_add -> fprintf oc "+"
+  | Pbinop_sub -> fprintf oc "-"
+  | Pbinop_mul -> fprintf oc "*"
+  | Pbinop_div -> fprintf oc "/"
+  | Pbinop_eq -> fprintf oc "=="
+  | Pbinop_ne -> fprintf oc "!="
+  | Pbinop_lt -> fprintf oc "<"
+  | Pbinop_gt -> fprintf oc ">"
+  | Pbinop_le -> fprintf oc "<="
+  | Pbinop_ge -> fprintf oc ">="
+  | Pbinop_and -> fprintf oc "&&"
+  | Pbinop_or -> fprintf oc "||"
 ;;
 
-let rec pp_cpp_expr oc e =
+let rec pp_pexpr oc e =
   match e with
-  | CExpr_int n -> fprintf oc "%d" n
-  | CExpr_var s -> fprintf oc "%s" s
-  | CExpr_binop (op, e1, e2) ->
-    fprintf oc "(%a %a %a)" pp_cpp_expr e1 pp_cpp_binop op pp_cpp_expr e2
-  | CExpr_call (f, args) ->
+  | Pexpr_int n -> fprintf oc "%d" n
+  | Pexpr_var s -> fprintf oc "%s" s
+  | Pexpr_binop (op, e1, e2) ->
+    fprintf oc "(%a %a %a)" pp_pexpr e1 pp_pbinop op pp_pexpr e2
+  | Pexpr_call (f, args) ->
     let () = fprintf oc "%s(" f in
     let rec pp_args xs =
       match xs with
       | [] -> ()
-      | [ a ] -> pp_cpp_expr oc a
+      | [ a ] -> pp_pexpr oc a
       | a :: rest ->
-        let () = fprintf oc "%a, " pp_cpp_expr a in
+        let () = fprintf oc "%a, " pp_pexpr a in
         pp_args rest
     in
     let () = pp_args args in
     fprintf oc ")"
-  | CExpr_assign (v, e) -> fprintf oc "%s = %a" v pp_cpp_expr e
-  | CExpr_tern (c, t, e) ->
-    fprintf oc "%a ? %a : %a" pp_cpp_expr c pp_cpp_expr t pp_cpp_expr e
+  | Pexpr_assign (v, e) -> fprintf oc "%s = %a" v pp_pexpr e
+  | Pexpr_tern (c, t, e) -> fprintf oc "%a ? %a : %a" pp_pexpr c pp_pexpr t pp_pexpr e
 ;;
 
-let rec pp_cpp_stmt oc stmt =
+let pp_decl oc (ty, vbs) =
+  let pp_vb oc (name, expr_opt) =
+    match expr_opt with
+    | None -> fprintf oc "%s" name
+    | Some expr -> fprintf oc "%s = %a" name pp_pexpr expr
+  in
+  let () = fprintf oc "%a " pp_ptype ty in
+  match vbs with
+  | [] -> failwith "should not happen"
+  | [ vb ] -> pp_vb oc vb
+  | vb1 :: vbs ->
+    let () = pp_vb oc vb1 in
+    fprintf oc "%a" (pp_list pp_vb ", ") vbs
+;;
+
+let rec pp_pstmt oc stmt =
   match stmt with
-  | CStmt_return None -> fprintf oc "return;"
-  | CStmt_return (Some e) -> fprintf oc "return %a;" pp_cpp_expr e
-  | CStmt_expr e -> fprintf oc "%a;" pp_cpp_expr e
-  | CStmt_block stmts ->
+  | Pstmt_return None -> fprintf oc "return;"
+  | Pstmt_return (Some e) -> fprintf oc "return %a;" pp_pexpr e
+  | Pstmt_expr e -> fprintf oc "%a;" pp_pexpr e
+  | Pstmt_block stmts ->
     let () = fprintf oc "{\n" in
-    let () = list_iter (fun s -> fprintf oc "  %a\n" pp_cpp_stmt s) stmts in
+    let () = list_iter (fun s -> fprintf oc "  %a\n" pp_pstmt s) stmts in
     fprintf oc "}"
-  | CStmt_decl (t, name, None) -> fprintf oc "%a %s;" pp_cpp_type t name
-  | CStmt_decl (t, name, Some e) ->
-    fprintf oc "%a %s = %a;" pp_cpp_type t name pp_cpp_expr e
+  | Pstmt_decl decl -> fprintf oc "%a;\n" pp_decl decl
+  | Pstmt_ite (c, t, None) -> fprintf oc "if (%a) %a\n" pp_pexpr c pp_pstmt t
+  | Pstmt_ite (c, t, Some e) ->
+    let () = fprintf oc "if (%a) %a\n" pp_pexpr c pp_pstmt t in
+    fprintf oc "else %a\n" pp_pstmt e
+  | Pstmt_for (decl_opt, cond_opt, iter_opt, body_opt) ->
+    let () =
+      fprintf
+        oc
+        "for (%a;%a;%a)"
+        (pp_option pp_decl)
+        decl_opt
+        (pp_option pp_pexpr)
+        cond_opt
+        (pp_option pp_pexpr)
+        iter_opt
+    in
+    (match body_opt with
+     | Some body ->
+       let () = fprintf oc "\n" in
+       pp_pstmt oc body
+     | None -> fprintf oc ";\n")
 ;;
 
-let pp_cpp_function oc func =
+let pp_pprogram_item oc func =
   match func with
-  | CFunction (fname, ftype, fparams, fbody) ->
-    let () = fprintf oc "%a %s(" pp_cpp_type ftype fname in
+  | Pitem_function (fname, ftype, fparams, fbody) ->
+    let () = fprintf oc "%a %s(" pp_ptype ftype fname in
     let rec pp_params xs =
       match xs with
       | [] -> ()
-      | [ (t, n) ] -> fprintf oc "%a %s" pp_cpp_type t n
+      | [ (t, n) ] -> fprintf oc "%a %s" pp_ptype t n
       | (t, n) :: rest ->
-        let () = fprintf oc "%a %s, " pp_cpp_type t n in
+        let () = fprintf oc "%a %s, " pp_ptype t n in
         pp_params rest
     in
     let () = pp_params fparams in
     let () = fprintf oc ") {\n" in
-    let () = list_iter (fprintf oc "  %a\n" pp_cpp_stmt) fbody in
+    let () = list_iter (fprintf oc "  %a\n" pp_pstmt) fbody in
     fprintf oc "}\n"
 ;;
 
-let pp_cpp_program oc prog = list_iter (pp_cpp_function oc) prog
+let pp_pprogram oc prog = list_iter (pp_pprogram_item oc) prog
 
 (* parser combinators *)
 
@@ -289,6 +359,19 @@ let take_while pred state =
         else return (list_rev acc) (str, pos))
   in
   aux state []
+;;
+
+let skip_while pred state =
+  let rec aux state =
+    match state with
+    | str, pos ->
+      if pos >= string_len str
+      then return () (str, pos)
+      else (
+        let ch = string_nth str pos in
+        if pred ch then aux (str, pos + 1) else return () (str, pos))
+  in
+  aux state
 ;;
 
 let take_while1 pred (str, pos) =
@@ -369,8 +452,8 @@ let parse_identifier =
 
 let parse_type =
   choice
-    [ drop_left (string "int") (return CType_int)
-    ; drop_left (string "void") (return CType_void)
+    [ drop_left (string "int") (return Ptype_int)
+    ; drop_left (string "void") (return Ptype_void)
     ]
 ;;
 
@@ -378,7 +461,7 @@ let make_binop_level expr_parser ops =
   let make_parser (op_str, op_ctor) =
     drop_left
       (trim (string op_str))
-      (map expr_parser (fun right left -> CExpr_binop (op_ctor, left, right)))
+      (map expr_parser (fun right left -> Pexpr_binop (op_ctor, left, right)))
   in
   let level = choice (list_map make_parser ops) in
   bind expr_parser (fun init ->
@@ -393,32 +476,40 @@ let parse_expr_call parse_expr =
          (bind parse_expr (fun e1 ->
             bind
               (many (skip_ws (drop_left (char ',') parse_expr)))
-              (fun es -> return (CExpr_call (fname, e1 :: es)))))
+              (fun es -> return (Pexpr_call (fname, e1 :: es)))))
          (* no args *)
-         (return (CExpr_call (fname, [])))))
+         (return (Pexpr_call (fname, [])))))
 ;;
 
 let parse_expr_atom parse_expr =
   skip_ws
     (choice
        [ parse_expr_call parse_expr
-       ; map (take_while1 is_digit) (fun chs -> CExpr_int (int_of_digits chs))
-       ; map parse_identifier (fun name -> CExpr_var name)
+       ; map (take_while1 is_digit) (fun chs -> Pexpr_int (int_of_digits chs))
+       ; map parse_identifier (fun name -> Pexpr_var name)
        ; parens parse_expr
        ])
 ;;
 
 let parse_expr_binop parse_expr =
   let parse_mul_div =
-    make_binop_level (parse_expr_atom parse_expr) [ "*", Cpp_mul; "/", Cpp_div ]
+    make_binop_level (parse_expr_atom parse_expr) [ "*", Pbinop_mul; "/", Pbinop_div ]
   in
-  let parse_add_sub = make_binop_level parse_mul_div [ "+", Cpp_add; "-", Cpp_sub ] in
+  let parse_add_sub =
+    make_binop_level parse_mul_div [ "+", Pbinop_add; "-", Pbinop_sub ]
+  in
   let parse_comp =
     make_binop_level
       parse_add_sub
-      [ "==", Cpp_eq; "!=", Cpp_ne; "<", Cpp_lt; ">", Cpp_gt; "<=", Cpp_le; ">=", Cpp_ge ]
+      [ "==", Pbinop_eq
+      ; "!=", Pbinop_ne
+      ; "<", Pbinop_lt
+      ; ">", Pbinop_gt
+      ; "<=", Pbinop_le
+      ; ">=", Pbinop_ge
+      ]
   in
-  let parse_logical = make_binop_level parse_comp [ "&&", Cpp_land; "||", Cpp_lor ] in
+  let parse_logical = make_binop_level parse_comp [ "&&", Pbinop_and; "||", Pbinop_or ] in
   parse_logical
 ;;
 
@@ -430,7 +521,7 @@ let parse_expr_tern parse_expr =
          (bind parse_expr (fun t ->
             drop_left
               (skip_ws (char ':'))
-              (bind parse_expr (fun e -> return (CExpr_tern (c, t, e)))))))
+              (bind parse_expr (fun e -> return (Pexpr_tern (c, t, e)))))))
       (return c))
 ;;
 
@@ -439,38 +530,92 @@ let parse_expr_assign parse_expr =
     (bind (skip_ws parse_identifier) (fun v ->
        drop_left
          (skip_ws (char '='))
-         (bind parse_expr (fun rhs -> return (CExpr_assign (v, rhs))))))
+         (bind parse_expr (fun rhs -> return (Pexpr_assign (v, rhs))))))
     (parse_expr_tern parse_expr)
 ;;
 
 let rec parse_expression state = parse_expr_assign parse_expression state
+
+let parse_decl =
+  let parse_single_var =
+    bind (skip_ws parse_identifier) (fun name ->
+      choice2
+        (drop_left
+           (skip_ws (char '='))
+           (map parse_expression (fun expr -> name, Some expr)))
+        (return (name, None)))
+  in
+  bind (skip_ws parse_type) (fun t ->
+    bind parse_single_var (fun v1 ->
+      map (many (drop_left (skip_ws (char ',')) parse_single_var)) (fun vs -> t, v1 :: vs)))
+;;
 
 let parse_stmt_return =
   drop_left
     (skip_ws (string "return"))
     (choice2
        (bind parse_expression (fun e ->
-          drop_left (skip_ws (char ';')) (return (CStmt_return (Some e)))))
-       (skip_ws (drop_left (char ';') (return (CStmt_return None)))))
+          (* TODO: should ';' be here?? *)
+          drop_left (skip_ws (char ';')) (return (Pstmt_return (Some e)))))
+       (skip_ws (drop_left (char ';') (return (Pstmt_return None)))))
 ;;
 
-let parse_stmt_decl =
+(* let parse_stmt_decl =
   bind (skip_ws parse_type) (fun t ->
     bind (skip_ws parse_identifier) (fun name ->
       choice2
         (drop_left
            (drop_left ws (char '='))
            (bind parse_expression (fun e ->
-              drop_left (skip_ws (char ';')) (return (CStmt_decl (t, name, Some e))))))
-        (drop_left (skip_ws (char ';')) (return (CStmt_decl (t, name, None))))))
+              drop_left (skip_ws (char ';')) (return (Pstmt_decl (t, name, Some e))))))
+        (drop_left (skip_ws (char ';')) (return (Pstmt_decl (t, name, None))))))
+;; *)
+
+let parse_stmt_ite parse_stmt =
+  drop_left
+    (skip_ws (string "if"))
+    (bind (parens parse_expression) (fun c ->
+       bind parse_stmt (fun t ->
+         choice2
+           (drop_left
+              (skip_ws (string "else"))
+              (bind parse_stmt (fun e -> return (Pstmt_ite (c, t, Some e)))))
+           (return (Pstmt_ite (c, t, None))))))
+;;
+
+let parse_stmt_for parse_stmt =
+  let option p = choice2 (map p (fun x -> Some x)) (return None) in
+  drop_left
+    (skip_ws (string "for"))
+    (drop_left
+       (skip_ws (char '('))
+       (bind (option parse_decl) (fun decl_opt ->
+          bind (option parse_expression) (fun cond_opt ->
+            drop_left
+              (skip_ws (char ';'))
+              (bind
+                 (option (parse_expr_assign parse_expression))
+                 (fun iter_opt ->
+                    drop_left
+                      (skip_ws (char ')'))
+                      (map
+                         (choice2
+                            (map parse_stmt (fun body -> Some body))
+                            (drop_left (skip_ws (char ';')) (return None)))
+                         (fun body_opt ->
+                            Pstmt_for (decl_opt, cond_opt, iter_opt, body_opt)))))))))
 ;;
 
 let parse_stmt_block parse_stmt =
-  map (braces (many parse_stmt)) (fun stmts -> CStmt_block stmts)
+  map (braces (many parse_stmt)) (fun stmts -> Pstmt_block stmts)
+;;
+
+let parse_stmt_decl =
+  bind parse_decl (fun decl -> drop_left (skip_ws (char ';')) (return (Pstmt_decl decl)))
 ;;
 
 let parse_stmt_expr =
-  bind parse_expression (fun e -> drop_left (skip_ws (char ';')) (return (CStmt_expr e)))
+  bind parse_expression (fun e -> drop_left (skip_ws (char ';')) (return (Pstmt_expr e)))
 ;;
 
 let rec parse_statement state =
@@ -478,6 +623,8 @@ let rec parse_statement state =
      [ parse_stmt_return
      ; parse_stmt_decl
      ; parse_stmt_block parse_statement
+     ; parse_stmt_ite parse_statement
+     ; parse_stmt_for parse_statement
      ; parse_stmt_expr
      ])
     state
@@ -506,7 +653,7 @@ let parse_function =
       bind parse_fun_params (fun params ->
         bind parse_statement (fun body ->
           match body with
-          | CStmt_block stmts -> return (CFunction (name, ty, params, stmts))
+          | Pstmt_block stmts -> return (Pitem_function (name, ty, params, stmts))
           | _ -> fail (Perr_expected "function body")))))
 ;;
 
@@ -521,6 +668,121 @@ let pp_parsing_error oc err =
 
 (* codegen *)
 
+let sizeof_ctype ptype =
+  match ptype with
+  | Ptype_int -> 8
+  | Ptype_void -> 0
+;;
+
+(* C0 like implementation (every var gets it's own place in vars pool) *)
+let eval_locals_pool_size stms =
+  let eval_decl (ty, vars) = sizeof_ctype ty * list_length vars in
+  let rec aux stm =
+    match stm with
+    | Pstmt_decl decl -> eval_decl decl
+    | Pstmt_ite (_, th, None) -> aux th
+    | Pstmt_ite (_, th, Some el) -> aux th + aux el
+    | Pstmt_for (None, _, _, None) -> 0
+    | Pstmt_for (Some decl, _, _, None) -> eval_decl decl
+    | Pstmt_for (None, _, _, Some body) -> aux body
+    | Pstmt_for (Some decl, _, _, Some body) -> eval_decl decl + aux body
+    | Pstmt_block stms -> list_fold (fun acc stm -> acc + aux stm) stms 0
+    | Pstmt_return _ -> 0
+    | Pstmt_expr _ -> 0
+  in
+  list_fold (fun acc stm -> acc + aux stm) stms 0
+;;
+
+let locals_pools = [| [] |]
+
+let push_pool size =
+  let old_pools = array_get locals_pools 0 in
+  array_set locals_pools 0 ((0, size) :: old_pools)
+;;
+
+let pop_pool size =
+  match array_get locals_pools 0 with
+  | [] -> failwith "something bad: can not pop pool (no pools)"
+  | (offset, _size) :: other_pools ->
+    if size = _size
+    then array_set locals_pools 0 other_pools
+    else failwith "something bad: can not pop pool (size mismatch)"
+;;
+
+let emit_init_locals_pool oc pool_size =
+  let () = push_pool pool_size in
+  fprintf oc "addi sp, sp, %d\n" (pool_size * (0 - 1))
+;;
+
+let emit_destroy_locals_pool oc pool_size =
+  let () = pop_pool pool_size in
+  fprintf oc "addi sp, sp, %d\n" pool_size
+;;
+
+(* negative offsets over fp (use it for local vars, not for function parameters) *)
+let get_offset_for_new_var nbytes =
+  match array_get locals_pools 0 with
+  | [] -> failwith "something bad: can not access pool (no pools)"
+  | (offset, pool_size) :: other_pools ->
+    let () =
+      if offset + nbytes > pool_size
+      then failwith "something bad: can not add var to pool (no enough space)"
+      else array_set locals_pools 0 ((offset + nbytes, pool_size) :: other_pools)
+    in
+    0 - nbytes - offset
+;;
+
+(* scopes *)
+
+let scopes = [| [] |]
+
+let enter_scope () =
+  let old_scopes = array_get scopes 0 in
+  array_set scopes 0 ([] :: old_scopes)
+;;
+
+let exit_scope () =
+  match array_get scopes 0 with
+  | [] -> failwith "something bad: can not exit scope (no scopes)"
+  | _ :: old_scopes -> array_set scopes 0 old_scopes
+;;
+
+let add_to_scope (name, offset) =
+  match array_get scopes 0 with
+  | [] -> failwith "something bad: can not add var (no scopes)"
+  | current_scope :: old_scopes ->
+    array_set scopes 0 (((name, offset) :: current_scope) :: old_scopes)
+;;
+
+let add_func_params_to_scope params =
+  let rec aux params i =
+    match params with
+    | [] -> ()
+    | (ty, name) :: xs ->
+      let offset = 16 + (i * 8) in
+      let () = add_to_scope (name, offset) in
+      aux xs (i + 1)
+  in
+  aux params 0
+;;
+
+let find_var_offset name =
+  let rec aux ss =
+    match ss with
+    | [] -> failwith (sprintf "something bad: can not find var %s offset" name)
+    | [] :: ss -> aux ss
+    | ((v, offset) :: vs) :: ss -> if v = name then offset else aux (vs :: ss)
+  in
+  aux (array_get scopes 0)
+;;
+
+let pp_local_var oc name =
+  let offset = find_var_offset name in
+  fprintf oc "%d(fp)" offset
+;;
+
+(* unique labels *)
+
 let label_counter = [| 0 |] (* TODO: replace this cringe with ref *)
 
 let fresh_label prefix =
@@ -529,30 +791,13 @@ let fresh_label prefix =
   sprintf "%s_%d" prefix n
 ;;
 
-let local_vars = [| [] |] (* TODO: replace this cringe with ref *)
-let clear_locals () = array_set local_vars 0 []
-
-let add_local name offset =
-  array_set local_vars 0 ((name, offset) :: array_get local_vars 0)
-;;
-
-let pp_local_var oc name =
-  let rec loop vars =
-    match vars with
-    | [] ->
-      let () = printf "[compiler] error: var %s not found\n" name in
-      exit 1
-    | (name2, offset) :: tail ->
-      if name = name2 then fprintf oc "%d(fp)" offset else loop tail
-  in
-  loop (array_get local_vars 0)
-;;
+(* codegen *)
 
 let rec codegen_expr oc expr =
   match expr with
-  | CExpr_var name -> fprintf oc "  ld a0, %a\n" pp_local_var name
-  | CExpr_int n -> fprintf oc "  li a0, %d\n" n
-  | CExpr_tern (cond, t, e) ->
+  | Pexpr_var name -> fprintf oc "  ld a0, %a\n" pp_local_var name
+  | Pexpr_int n -> fprintf oc "  li a0, %d\n" n
+  | Pexpr_tern (cond, t, e) ->
     let else_label = fresh_label ".Lelse" in
     let end_label = fresh_label ".Lend" in
     let () = codegen_expr oc cond in
@@ -563,7 +808,7 @@ let rec codegen_expr oc expr =
     let () = codegen_expr oc e in
     let () = fprintf oc "%s:\n" end_label in
     ()
-  | CExpr_binop (op, e1, e2) ->
+  | Pexpr_binop (op, e1, e2) ->
     let () = codegen_expr oc e1 in
     let () = fprintf oc "  addi sp, sp, -8\n" in
     let () = fprintf oc "  sd a0, 0(sp)\n" in
@@ -571,19 +816,19 @@ let rec codegen_expr oc expr =
     let () = fprintf oc "  ld t0, 0(sp)\n" in
     let () = fprintf oc "  addi sp, sp, 8\n" in
     (match op with
-     | Cpp_add -> fprintf oc "  add a0, t0, a0\n"
-     | Cpp_sub -> fprintf oc "  sub a0, t0, a0\n"
-     | Cpp_mul -> fprintf oc "  mul a0, t0, a0\n"
-     | Cpp_div -> fprintf oc "  div a0, t0, a0\n"
-     | Cpp_eq -> fprintf oc "  sub a0, t0, a0\n  seqz a0, a0\n"
-     | Cpp_ne -> fprintf oc "  sub a0, t0, a0\n  snez a0, a0\n"
-     | Cpp_lt -> fprintf oc "  slt a0, t0, a0\n"
-     | Cpp_gt -> fprintf oc "  slt a0, a0, t0\n"
-     | Cpp_le -> fprintf oc "  slt a0, a0, t0\n  xori a0, a0, 1\n"
-     | Cpp_ge -> fprintf oc "  slt a0, t0, a0\n  xori a0, a0, 1\n"
-     | Cpp_land -> fprintf oc "  and a0, t0, a0\n"
-     | Cpp_lor -> fprintf oc "  or a0, t0, a0\n")
-  | CExpr_call (fname, args) ->
+     | Pbinop_add -> fprintf oc "  add a0, t0, a0\n"
+     | Pbinop_sub -> fprintf oc "  sub a0, t0, a0\n"
+     | Pbinop_mul -> fprintf oc "  mul a0, t0, a0\n"
+     | Pbinop_div -> fprintf oc "  div a0, t0, a0\n"
+     | Pbinop_eq -> fprintf oc "  sub a0, t0, a0\n  seqz a0, a0\n"
+     | Pbinop_ne -> fprintf oc "  sub a0, t0, a0\n  snez a0, a0\n"
+     | Pbinop_lt -> fprintf oc "  slt a0, t0, a0\n"
+     | Pbinop_gt -> fprintf oc "  slt a0, a0, t0\n"
+     | Pbinop_le -> fprintf oc "  slt a0, a0, t0\n  xori a0, a0, 1\n"
+     | Pbinop_ge -> fprintf oc "  slt a0, t0, a0\n  xori a0, a0, 1\n"
+     | Pbinop_and -> fprintf oc "  and a0, t0, a0\n"
+     | Pbinop_or -> fprintf oc "  or a0, t0, a0\n")
+  | Pexpr_call (fname, args) ->
     let argc = list_length args in
     let rec alloc_args args i =
       match args with
@@ -598,26 +843,76 @@ let rec codegen_expr oc expr =
     let () = fprintf oc "  call %s\n" fname in
     let () = if argc > 0 then fprintf oc "  addi sp, sp, %d\n" (8 * argc) else () in
     ()
-  | CExpr_assign (var, expr) ->
+  | Pexpr_assign (var, expr) ->
     let () = codegen_expr oc expr in
     fprintf oc "  sd a0, %a\n" pp_local_var var
 ;;
 
+let codegen_decl oc (ty, vbs) =
+  let tysize = sizeof_ctype ty in
+  let rec aux vbs =
+    match vbs with
+    | [] -> ()
+    | (name, rhs_opt) :: vbs ->
+      let offset = get_offset_for_new_var tysize in
+      let () = add_to_scope (name, offset) in
+      (match rhs_opt with
+       | Some expr ->
+         let () = codegen_expr oc expr in
+         fprintf oc "  sd a0, %a\n" pp_local_var name
+       | None -> ())
+  in
+  aux vbs
+;;
+
 let rec codegen_statement oc epilogue stmt =
   match stmt with
-  | CStmt_return None -> fprintf oc "  j %s\n" epilogue
-  | CStmt_return (Some e) ->
+  | Pstmt_return None -> fprintf oc "  j %s\n" epilogue
+  | Pstmt_return (Some e) ->
     let () = codegen_expr oc e in
     let () = fprintf oc "  j %s\n" epilogue in
     ()
-  | CStmt_expr e -> codegen_expr oc e
-  | CStmt_block stmts -> list_iter (codegen_statement oc epilogue) stmts
-  | _ ->
-    let () = printf "[compiler] error: not implemented codegen_statement\n" in
-    exit 1
+  | Pstmt_expr e -> codegen_expr oc e
+  | Pstmt_block stmts -> list_iter (codegen_statement oc epilogue) stmts
+  | Pstmt_ite (c, t, None) ->
+    let () = codegen_expr oc c in
+    let end_if_label = fresh_label "End_if" in
+    let () = fprintf oc "  beqz a0, %s\n" end_if_label in
+    let () = codegen_statement oc epilogue t in
+    let () = fprintf oc "%s: \n" end_if_label in
+    ()
+  | Pstmt_ite (c, t, Some e) ->
+    let () = codegen_expr oc c in
+    let else_label = fresh_label "Else" in
+    let end_if_label = fresh_label "End_if" in
+    let () = fprintf oc "  beqz a0, %s\n" else_label in
+    let () = codegen_statement oc epilogue t in
+    let () = fprintf oc "  j %s\n" end_if_label in
+    let () = fprintf oc "%s:\n" else_label in
+    let () = codegen_statement oc epilogue e in
+    let () = fprintf oc "%s:\n" end_if_label in
+    ()
+  | Pstmt_for (decl, cond_opt, iter_opt, body_opt) ->
+    let call_option f x_opt =
+      match x_opt with
+      | None -> ()
+      | Some x -> f x
+    in
+    let () = call_option (codegen_decl oc) decl in
+    let loop_label = fresh_label "Loop" in
+    let end_label = fresh_label "End_loop" in
+    let () = fprintf oc "%s:\n" loop_label in
+    let () = call_option (codegen_expr oc) cond_opt in
+    let () = call_option (fun _ -> fprintf oc "  beqz a0, %s\n" end_label) cond_opt in
+    let () = call_option (codegen_expr oc) iter_opt in
+    let () = call_option (codegen_statement oc epilogue) body_opt in
+    let () = fprintf oc "  j %s\n" loop_label in
+    let () = fprintf oc "%s:\n" end_label in
+    ()
+  | Pstmt_decl decl -> codegen_decl oc decl
 ;;
 
-let pp_prologue oc fname =
+let pp_prologue oc fname pool_size =
   let () = fprintf oc ".global %s\n" fname in
   let () = fprintf oc ".text\n" in
   let () = fprintf oc "%s:\n" fname in
@@ -625,11 +920,13 @@ let pp_prologue oc fname =
   let () = fprintf oc "  sd fp, 8(sp)\n" in
   let () = fprintf oc "  sd ra, 0(sp)\n" in
   let () = fprintf oc "  mv fp, sp\n" in
+  let () = emit_init_locals_pool oc pool_size in
   ()
 ;;
 
-let pp_epilogue oc epilogue_label =
+let pp_epilogue oc epilogue_label pool_size =
   let () = fprintf oc "%s:\n" epilogue_label in
+  let () = emit_destroy_locals_pool oc pool_size in
   let () = fprintf oc "  ld ra, 0(sp)\n" in
   let () = fprintf oc "  ld fp, 8(sp)\n" in
   let () = fprintf oc "  addi sp, sp, 16\n" in
@@ -639,21 +936,15 @@ let pp_epilogue oc epilogue_label =
 
 let codegen_function oc func =
   match func with
-  | CFunction (fname, _, params, stms) ->
-    let rec add_params params i =
-      match params with
-      | [] -> ()
-      | (ty, name) :: xs ->
-        let offset = 16 + (i * 8) in
-        let () = add_local name offset in
-        add_params xs (i + 1)
-    in
-    let () = clear_locals () in
-    let () = add_params params 0 in
+  | Pitem_function (fname, _, params, stms) ->
+    let () = enter_scope () in
+    let () = add_func_params_to_scope params in
     let epilogue_label = fresh_label (sprintf "%s_epilogue" fname) in
-    let () = pp_prologue oc fname in
+    let pool_size = eval_locals_pool_size stms in
+    let () = pp_prologue oc fname pool_size in
     let () = list_iter (codegen_statement oc epilogue_label) stms in
-    let () = pp_epilogue oc epilogue_label in
+    let () = pp_epilogue oc epilogue_label pool_size in
+    let () = exit_scope () in
     ()
 ;;
 
@@ -661,17 +952,9 @@ let codegen_program oc prog = list_iter (codegen_function oc) prog
 
 (* driver *)
 
-let run_single_parser input =
-  match parse_program (input, 0) with
-  | Prez_error err -> printf "parsing failed: %a" pp_parsing_error err
-  | Prez_success (prog, _) -> printf "parsed:\n%a" pp_cpp_program prog
-;;
-
-let run_single_program oc input =
-  match parse_program (input, 0) with
-  | Prez_error err -> printf "parsing failed: %a" pp_parsing_error err
-  | Prez_success (ast, _) -> codegen_program oc ast
-;;
+type target =
+  | Parsetree
+  | RiscV64
 
 (* TODO: rewrite *)
 let rec input_all ic =
@@ -693,12 +976,40 @@ let usage () =
   exit 1
 ;;
 
+let current_line state =
+  let str, pos = state in
+  let rec loop pos cnt =
+    if pos >= string_len str
+    then cnt
+    else if string_nth str pos = '\n'
+    then loop (pos + 1) (cnt + 1)
+    else loop (pos + 1) cnt
+  in
+  loop pos 1
+;;
+
+let run_single oc target input =
+  match parse_program (input, 0) with
+  | Prez_error err -> printf "parsing failed: %a" pp_parsing_error err
+  | Prez_success (ast, (_, pos)) ->
+    if pos = string_len input
+    then (
+      match target with
+      | Parsetree -> pp_pprogram oc ast
+      | RiscV64 -> codegen_program oc ast)
+    else
+      printf
+        "parsing failed: can not parse many program items (failed at ~%d line)\n"
+        (current_line (input, pos) + 1)
+;;
+
 let parse_args argv =
   let argc = array_len argv in
-  let rec loop i input_opt output_opt =
+  let rec loop i input_opt output_opt target_opt =
     if i >= argc
-    then input_opt, output_opt
+    then input_opt, output_opt, target_opt
     else (
+      (* TODO: rewrite using match with *)
       let arg = array_get argv i in
       if string_equal arg "-o"
       then
@@ -706,14 +1017,28 @@ let parse_args argv =
         then usage ()
         else (
           match output_opt with
-          | None -> loop (i + 2) input_opt (Some (array_get argv (i + 1)))
+          | None -> loop (i + 2) input_opt (Some (array_get argv (i + 1))) target_opt
+          | Some _ -> usage ())
+      else if string_equal arg "--target"
+      then
+        if i + 1 >= argc
+        then usage ()
+        else (
+          match target_opt with
+          | None ->
+            let target_str = array_get argv (i + 1) in
+            if target_str = "rv64"
+            then loop (i + 2) input_opt output_opt (Some RiscV64)
+            else if target_str = "parsetree"
+            then loop (i + 2) input_opt output_opt (Some Parsetree)
+            else usage ()
           | Some _ -> usage ())
       else (
         match input_opt with
-        | None -> loop (i + 1) (Some arg) output_opt
+        | None -> loop (i + 1) (Some arg) output_opt target_opt
         | Some _ -> usage ()))
   in
-  let input_opt, output_opt = loop 1 None None in
+  let input_opt, output_opt, target_opt = loop 1 None None None in
   let input_path =
     match input_opt with
     | None -> usage ()
@@ -724,14 +1049,21 @@ let parse_args argv =
     | None -> "a.s"
     | Some s -> s
   in
-  input_path, output_path
+  let target =
+    match target_opt with
+    | None -> usage ()
+    | Some s -> s
+  in
+  input_path, output_path, target
 ;;
 
+(* main *)
+
 let main =
-  let input_path, output_path = parse_args sys_argv in
+  let input_path, output_path, target = parse_args sys_argv in
   let ic = open_in input_path in
   let oc = open_out output_path in
-  let () = run_single_program oc (input_all ic) in
+  let () = run_single oc target (input_all ic) in
   let () = close_in ic in
   let () = close_out oc in
   0
