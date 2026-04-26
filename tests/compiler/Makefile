@@ -19,9 +19,13 @@ compiler.exe: compiler.s
 	x86_64-linux-gnu-gcc --sysroot=/usr/x86_64-linux-gnu/sys-root/fc42 -static _build/compiler.o $(AMD64_STDLIB) -o _build/compiler.exe
 	rm _build/compiler.o
 
+# program.cpp ~> parsetree.cpp   (via compiler)
+parsetree.cpp: compiler.exe program.cpp
+	qemu-x86_64 _build/compiler.exe program.cpp -o ./_build/parsetree.cpp --target parsetree
+
 # program.cpp ~> program.s   (via compiler)
 program.s: compiler.exe program.cpp
-	qemu-x86_64 _build/compiler.exe program.cpp -o ./_build/program.s
+	qemu-x86_64 _build/compiler.exe program.cpp -o ./_build/program.s --target rv64
 
 # program.s ~> program.exe   
 program.exe: program.s
