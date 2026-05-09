@@ -112,7 +112,7 @@ module Compiler = struct
     let vbs =
       List.map
         ~f:(function
-          | ANF.ANF_vb vb -> vb
+          | ANF.ANF_vb (flg, Apat_var name, body) -> flg, name, body
           | _ -> failwith "not implemented")
         stru
     in
@@ -135,8 +135,7 @@ module Compiler = struct
     let vbs =
       List.map
         ~f:(function
-          | ANF.ANF_vb vb -> vb
-          | _ -> failwith "not implemented")
+          | ANF.ANF_vb vb -> vb)
         stru
     in
     let f ~path = LLVM_impl.codegen vbs path |> Result.ok_or_failwith in

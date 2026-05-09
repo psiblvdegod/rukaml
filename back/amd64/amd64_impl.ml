@@ -404,12 +404,12 @@ let allocate_locals ppf input_anf : now:unit -> unit =
   let names = ref [] in
   let rec helper = function
     | ANF.EComplex c -> helper_c c
-    | ELet (_flg, Tpat_var name, rhs, where_) ->
+    | ELet (_flg, Apat_var name, rhs, where_) ->
       Addr_of_local.extend name;
       names := name :: !names;
       helper_c rhs;
       helper where_
-    | ELet (_flg, (Tpat_unit | Tpat_any), rhs, where_) ->
+    | ELet (_flg, (Apat_any | Apat_unit), rhs, where_) ->
       helper_c rhs;
       helper where_
     | elet -> failwiths "TODO: not implemented %d { %a }" __LINE__ ANF.pp elet
@@ -552,7 +552,7 @@ let rec generate_body ppf body =
   in
   let rec helper dest = function
     | Compile_lib.ANF.EComplex c -> helper_c dest c
-    | ELet (_, Tpat_var name, rhs, wher) ->
+    | ELet (_, Apat_var name, rhs, wher) ->
       assert (Addr_of_local.contains name);
       let rhs_dest = DStack_var name in
       (* printfn ppf "    ;; calculate rhs and put into %a. offset = %d" pp_dest
@@ -560,7 +560,7 @@ let rec generate_body ppf body =
            (Addr_of_local.find_exn name); *)
       helper_c rhs_dest rhs;
       helper dest wher
-    | ELet (_, (Tpat_any | Tpat_unit), rhs, wher) ->
+    | ELet (_, (Apat_any | Apat_unit), rhs, wher) ->
       helper_c DDiscard rhs;
       helper dest wher
     | ELet _ -> failwiths "TODO: implement pattern matching here"
@@ -1295,7 +1295,7 @@ let emit_global_eval ppf ident expr =
   printfn ppf "  ret ;;; init_%a" Toplevel.pp_label_exn ident
 ;;
 
-let emit_global_match ppf ident const cexpr =
+let emit_global_match ppf ident const expr =
   printfn ppf "section .text";
   printfn ppf "init_%a:" Toplevel.pp_label_exn ident;
   printfn ppf "  push rbp";
@@ -1314,7 +1314,7 @@ let emit_global_match ppf ident const cexpr =
   printfn ppf "  mov qword [rsp], rax";
   printfn ppf "  ; begin eval matching rhs";
   (* result in rax *)
-  generate_body ppf (ANF.EComplex cexpr);
+  generate_body ppf expr;
   printfn ppf "  ; end eval matching rhs";
   printfn ppf "  mov qword rdi, rax";
   printfn ppf "  mov qword rsi, [rsp]";
@@ -1463,10 +1463,10 @@ section .text
     let open Compile_lib in
     anf
     |> List.iter (function
-      | ANF.ANF_vb (_flg, ({ hum_name = "main"; _ } as name), body) ->
+      | ANF.ANF_vb (_flg, Apat_var ({ hum_name = "main"; _ } as name), body) ->
         Toplevel.extend name ~kind:Main;
         emit_global_function ppf name body
-      | ANF.ANF_vb (_flg, name, body) ->
+      | ANF.ANF_vb (_flg, Apat_var name, body) ->
         let pats, _ = Compile_lib.ANF.group_abstractions body in
         (match List.length pats with
          | 0 ->
@@ -1475,11 +1475,11 @@ section .text
          | argc ->
            Toplevel.extend name ~kind:(Function { argc });
            emit_global_function ppf name body)
-      | ANF.ANF_eval body ->
+      | ANF.ANF_vb (_flg, (Apat_any | Apat_unit), body) ->
         let fresh = ANF.gensym_id ~prefix:"eval" () in
         Toplevel.extend fresh ~kind:(Immediate Eval);
         emit_global_eval ppf fresh body
-      | ANF.ANF_match (const, cexpr) ->
+      | ANF.ANF_vb (_flg, Apat_const const, cexpr) ->
         let fresh = ANF.gensym_id ~prefix:"match" () in
         Toplevel.extend fresh ~kind:(Immediate Match);
         emit_global_match ppf fresh const cexpr);
