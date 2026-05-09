@@ -20,16 +20,18 @@ and c_expr =
   | CAtom of imm_expr
 
 and expr =
-  | ELet of Frontend.Parsetree.rec_flag * Frontend.Typedtree.pattern * c_expr * expr
+  | ELet of Parsetree.rec_flag * patt * c_expr * expr
   | EComplex of c_expr
 
-type vb = Parsetree.rec_flag * Ident.t * expr
+and patt =
+  | Apat_any
+  | Apat_unit
+  | Apat_var of Ident.t
+  | Apat_const of Parsetree.const
 
-type stru_item =
-  | ANF_vb of vb
-  | ANF_match of (Parsetree.const * c_expr)
-  | ANF_eval of expr
+and vb = Parsetree.rec_flag * patt * expr
 
+type stru_item = ANF_vb of vb
 type stru = stru_item list
 
 val show_c_expr : c_expr -> string
