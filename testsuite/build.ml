@@ -63,6 +63,7 @@ module Target = struct
   ;;
 
   open Option
+
   let ( let* ) = ( >>= )
 
   (** Assemble target's IL to arch-specific object file *)
@@ -151,10 +152,9 @@ module SexpParser = struct
     | Parsed (r, rest) -> f r rest
     | Failed _ as err -> err
   ;;
+
   let ( let* ) = ( >>= )
-
   let ( >>| ) p f = p >>= fun x -> return (f x)
-
   let ( *> ) p1 p2 = p1 >>= fun _ -> p2
 
   let ( <|> ) p1 p2 inp =
@@ -262,7 +262,6 @@ module TestSpec = struct
     let pstdout = string "stdout" *> many atom in
     let pstdin = string "stdin" *> many atom in
     let psh = string "sh" *> many atom in
-
     let* () = string "run" in
     let* exit = option 0 (list pexit) in
     let* stdout = option [] (list pstdout) in
@@ -275,7 +274,6 @@ module TestSpec = struct
     let* () = string "test" in
     let psrc = string "src" *> atom >>| Path.of_string in
     let pflags = string "flags" *> many1 (list (many atom)) in
-
     let* src = option None (list psrc >>| Option.some) in
     let* targets = list (string "targets" *> many1 ptarget) in
     let* flags = option [ [] ] (list pflags) in
@@ -287,26 +285,27 @@ module TestSpec = struct
   let of_file (path : Path.t) =
     let ( let* ), return = Result.( >>= ), Result.return in
     let fail msg = Result.fail @@ msg ^ spf " in %s" (Path.to_string path) in
-
     let rec parse_next parse file =
-      let* line = In_channel.input_line file |> Result.of_option ~error:"eof" in
+      let line =
+        match In_channel.input_line file with
+        | Some x -> x
+        | None ->
+          failwith (Stdlib.Format.sprintf "unexpected eof in %s" (Path.to_string path))
+      in
       match parse (`String line) with
       | Angstrom.Buffered.Done (_, res) -> return res
       | Fail (_, _, msg) -> fail msg
       | Partial f -> parse_next f file
     in
-
     let pcomment =
       let open Angstrom in
       skip_while Char.is_whitespace *> string "(*" *> many_till any_char (string "*)")
       >>| String.of_char_list
     in
-
     (* goes through the file line by line until
        it fully parses the first comment *)
     let parse = Angstrom.Buffered.feed @@ Angstrom.Buffered.parse pcomment in
     let* comment = In_channel.with_open_text (Path.to_string path) (parse_next parse) in
-
     let* sexp =
       match Parsexp.Many.parse_string comment with
       | Error err -> fail (Parsexp.Parse_error.message err)
@@ -368,7 +367,6 @@ module Test = struct
       |> String.concat ~sep:"."
       |> String.chop_suffix_if_exists ~suffix:".ml"
     in
-
     let input = Path.append Path.dot_dot test.path in
     let input =
       Option.value_map
@@ -376,17 +374,13 @@ module Test = struct
         ~default:input
         ~f:(Path.append (Path.dirname_defaulting_to_dot input))
     in
-
     let ( >>= ) = Option.( >>= ) in
-
     let gen_tgt (spec : TestSpec.target) ~suffix { expected; artifacts; cram } flags =
       let tgt = build_target spec.name ~root in
-
       let compiled =
         Target.compile tgt ~name:(name ^ suffix) ~input ~flags ~promote:spec.promote
       in
       let expected = compiled.rule :: expected in
-
       let assembled =
         Target.assemble tgt { dir = Path.of_string "../expected"; art = compiled }
       in
@@ -394,7 +388,6 @@ module Test = struct
         Option.value_map assembled ~default:artifacts ~f:(fun art ->
           art.rule :: artifacts)
       in
-
       let runtime = Path.of_string (spf "back/%s/rukaml_stdlib.o" tgt.name) in
       let runtime = Path.append Path.dot_dot @@ Path.append root runtime in
       (* link only if assemble succeeded *)
@@ -404,7 +397,6 @@ module Test = struct
       let artifacts =
         Option.value_map linked ~default:artifacts ~f:(fun art -> art.rule :: artifacts)
       in
-
       let gen_run (spec : TestSpec.run) =
         linked
         >>= fun linked ->
@@ -424,7 +416,6 @@ module Test = struct
         in
         Some (art.rule, cram_rule)
       in
-
       let artifacts, cram =
         let default = artifacts, cram in
         match test.spec.run with
@@ -433,10 +424,8 @@ module Test = struct
           Option.value_map (gen_run spec) ~default ~f:(fun (rule, cram_rule) ->
             rule :: artifacts, cram_rule :: cram)
       in
-
       { expected; artifacts; cram }
     in
-
     List.fold test.spec.targets ~init:rules_empty ~f:(fun acc tgt ->
       List.foldi test.spec.flags ~init:acc ~f:(fun idx ->
         gen_tgt tgt ~suffix:(".fl" ^ Int.to_string idx)))
@@ -451,7 +440,6 @@ let () =
     | hd :: tl -> hd, tl
     | [] -> failwith "invalid argv"
   in
-
   let tests =
     List.map test_paths ~f:(fun path ->
       Test.{ path; spec = Result.ok_or_failwith (TestSpec.of_file path) })
@@ -464,7 +452,6 @@ let () =
       ; cram = List.append rules.cram acc.cram
       })
   in
-
   let concat_lines lines = String.concat ~sep:"\n" lines in
   let write_all file ~data =
     Out_channel.with_open_text file (fun ch -> Stdlib.output_string ch data)
