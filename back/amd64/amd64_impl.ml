@@ -244,16 +244,12 @@ let stdlib_aliases =
   ]
 ;;
 
-(* notice:
-    DO NOT access toplevel constants and functions using Ident.pp or .hum_name
-    use Toplevel.pp_label_exn instead of it
-    global labels should be unique and this module provides it *)
 module Toplevel = struct
   (* immediate is anything that needs to be evaluated before control flow enters main *)
   type immediate =
     | Constant (* let x = <expr which is not a lambda> *)
     | Match (* let 42 = <expr> *)
-    | Eval (* let () = <expr> and let _ = <expr> *)
+    | Eval (* let () = <expr> or let _ = <expr> *)
 
   type kind =
     | Main (* main: *)
@@ -1247,7 +1243,7 @@ let rec generate_body ppf body =
       let pats, body = ANF.group_abstractions body in
       let pats = pat :: pats in
       let argc = List.length pats in
-      let names = List.map (fun (ANF.APname name) -> name) pats in
+      let names = List.map (fun (ANF.Apat_var name) -> name) pats in
       let lam_name = Ident.of_string (Printf.sprintf "__lam_%d" (gensym ())) in
       Toplevel.extend lam_name ~kind:(Function { argc });
       printfn ppf "section .text";
@@ -1541,10 +1537,10 @@ let emit_global_function ppf name body =
     printfn ppf "@[<h>%a:@]" Toplevel.pp_label_exn name;
     let pats, body = ANF.group_abstractions body in
     let argc = List.length pats in
-    let names = List.map (fun (ANF.APname name) -> name) pats in
+    let names = List.map (fun (ANF.Apat_var name) -> name) pats in
     List.rev pats
     |> ListLabels.iteri ~f:(fun i -> function
-      | ANF.APname name -> Addr_of_local.add_arg ~argc i name);
+      | ANF.Apat_var name -> Addr_of_local.add_arg ~argc i name);
     printfn ppf "  push rbp";
     printfn ppf "  mov  rbp, rsp";
     if Toplevel.is_main name

@@ -21,8 +21,6 @@ let failwiths fmt = Format.kasprintf failwith fmt
 
 open Frontend
 
-type apat = APname of Ident.t [@@deriving show { with_path = false }]
-
 type imm_expr =
   | AUnit
   | AConst of Parsetree.const
@@ -42,16 +40,16 @@ and c_expr =
 [@@deriving show { with_path = false }]
 
 and expr =
-  | ELet of Parsetree.rec_flag * patt * c_expr * expr
+  | ELet of Parsetree.rec_flag * apat * c_expr * expr
   | EComplex of c_expr
 
-and patt =
+and apat =
   | Apat_any
   | Apat_unit
   | Apat_var of Ident.t
   | Apat_const of Parsetree.const
 
-and vb = Parsetree.rec_flag * patt * expr
+and vb = Parsetree.rec_flag * apat * expr
 
 type stru_item = ANF_vb of vb
 type stru = stru_item list
@@ -64,7 +62,7 @@ let make_let_nonrec name rhs wher = ELet (NonRecursive, Apat_var name, rhs, wher
 let catom i = CAtom i
 let cvar name = CAtom (AVar name)
 let cite cond th el = CIte (cond, th, el)
-let alam name e = ALam (APname name, e)
+let alam name e = ALam (Apat_var name, e)
 let elam name e = complex_of_atom (alam name e)
 let elet flg pat cexp exp = ELet (flg, pat, cexp, exp)
 
@@ -92,7 +90,10 @@ include struct
   open Format
 
   let pp_apat ppf = function
-    | APname s -> Ident.pp ppf s
+    | Apat_var s -> Ident.pp ppf s
+    | Apat_any -> fprintf ppf "_"
+    | Apat_unit -> fprintf ppf "()"
+    | Apat_const c -> Pprint.pp_const ppf c
   ;;
 
   let rec helper ppf = function
@@ -176,7 +177,7 @@ include struct
     | Apat_any -> fprintf ppf "_"
     | Apat_unit -> fprintf ppf "()"
     | Apat_var name -> fprintf ppf "%a" Ident.pp name
-    | Apat_const const -> fprintf ppf "%a" Parsetree.pp_const const
+    | Apat_const const -> fprintf ppf "%a" Pprint.pp_const const
   ;;
 
   let pp_a = helper_a
@@ -633,7 +634,7 @@ let anf =
         , (let name = gensym_id () in
            CAtom
              (ALam
-                ( APname vname
+                ( Apat_var vname
                 , helper body (fun imm ->
                     ELet
                       (NonRecursive, Apat_var name, CAtom imm, complex_of_atom (AVar name)))

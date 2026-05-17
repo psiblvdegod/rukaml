@@ -2,7 +2,7 @@ open Frontend
 open ANF
 
 let complex_of_atom x = EComplex (CAtom x)
-let alam name e = ALam (APname name, e)
+let alam name e = ALam (Apat_var name, e)
 let elam name e = complex_of_atom (alam name e)
 
 let test_anf_pat text =

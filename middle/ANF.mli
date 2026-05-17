@@ -1,9 +1,5 @@
 open Frontend
 
-type apat = APname of Frontend.Ident.t
-
-val pp_apat : Format.formatter -> apat -> unit
-
 type imm_expr =
   | AUnit
   | AConst of Frontend.Parsetree.const
@@ -20,16 +16,16 @@ and c_expr =
   | CAtom of imm_expr
 
 and expr =
-  | ELet of Parsetree.rec_flag * patt * c_expr * expr
+  | ELet of Parsetree.rec_flag * apat * c_expr * expr
   | EComplex of c_expr
 
-and patt =
+and apat =
   | Apat_any
   | Apat_unit
   | Apat_var of Ident.t
   | Apat_const of Parsetree.const
 
-and vb = Parsetree.rec_flag * patt * expr
+and vb = Parsetree.rec_flag * apat * expr
 
 type stru_item = ANF_vb of vb
 type stru = stru_item list

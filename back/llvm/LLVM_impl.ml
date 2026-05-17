@@ -245,7 +245,7 @@ let on_vb (module LL : LL.S) (module TD : TOP_DEFS) : ANF.vb -> _ =
     in
     let the_function = Llvm.declare_function name.hum_name fun_typ LL.module_ in
     List.iteri
-      (fun n (ANF.APname key) ->
+      (fun n (ANF.Apat_var key) ->
          let param = Llvm.param the_function n in
          log "  formal parameter %d: %s" n (Llvm.string_of_llvalue param);
          add_virt_binding ~key param)

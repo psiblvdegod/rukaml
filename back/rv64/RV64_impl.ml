@@ -826,7 +826,6 @@ let generate_body is_toplevel body =
     | (CApp (AVar f, (AConst _ as arg), []) | CApp (AVar f, (AVar _ as arg), [])) as cexpr
       ->
       (* A 1 argument application *)
-      set_verbose true;
       log "cexpr = @[%a@]" ANF.pp_c cexpr;
       with_two_slots (fun arg0 arg1 ->
         emit addi SP SP (-16) ~comm:(sprintf "pad and 1st arg of function %s" f.hum_name);
@@ -1185,7 +1184,7 @@ let codegen ?(wrap_main_into_start = true) anf file =
       let names =
         List.map
           (function
-            | ANF.APname name -> name)
+            | ANF.Apat_var name -> name)
           pats
       in
       (* let _ = if argc mod 2 = 0 then argc else argc + 1 in *)
@@ -1199,7 +1198,7 @@ let codegen ?(wrap_main_into_start = true) anf file =
         else
           List.rev pats
           |> ListLabels.iteri ~f:(fun i -> function
-            | ANF.APname name -> Addr_of_local.add_arg ~argc i name)
+            | ANF.Apat_var name -> Addr_of_local.add_arg ~argc i name)
       in
       generate_body is_toplevel body;
       Addr_of_local.remove_args names;
