@@ -345,6 +345,170 @@ module Toplevel = struct
   ;;
 end
 
+module Mangling = struct
+  let mangled_names : (Ident.t, Ident.t) Hashtbl.t = Hashtbl.create 100
+
+  let mangle (ident : Ident.t) =
+    let buf = Buffer.create (String.length ident.hum_name) in
+    String.iter
+      (fun c ->
+         match c with
+         | 'A' .. 'Z' | 'a' .. 'z' | '0' .. '9' | '_' -> Buffer.add_char buf c
+         | _ ->
+           (* TODO: names may collide after this substitution *)
+           Printf.bprintf buf "_code%u" (Char.code c))
+      ident.hum_name;
+    Buffer.add_string buf (Format.asprintf "_id%d" ident.id);
+    Hashtbl.replace mangled_names ident (Ident.ident (Buffer.contents buf) ident.id)
+  ;;
+
+  let contains (ident : Ident.t) = Hashtbl.mem mangled_names ident
+  let find (ident : Ident.t) = Hashtbl.find mangled_names ident
+  let clear () = Hashtbl.clear mangled_names
+
+  let pp_mangled_names ppf () =
+    Format.fprintf ppf "{\n";
+    Hashtbl.iter
+      (fun k v -> Format.fprintf ppf "\t%a ~> %a;\n" Ident.pp k Ident.pp v)
+      mangled_names;
+    Format.fprintf ppf "}"
+  ;;
+
+  let%expect_test _ =
+    mangle (Ident.ident "let*>" 42);
+    pp_mangled_names Format.std_formatter ();
+    [%expect
+      {|
+      {
+      	let*> ~> let_code42_code62_id42;
+      } |}]
+  ;;
+
+  let rec rename_a : Ident.t list -> ANF.imm_expr -> ANF.imm_expr =
+    fun bounded -> function
+    | (AUnit | AConst _ | APrimitive _) as i -> i
+    | AVar v when contains v && not (List.mem v bounded) -> AVar (find v)
+    | AVar _ as i -> i
+    | ATuple (x1, x2, xs) ->
+      ATuple (rename_a bounded x1, rename_a bounded x2, List.map (rename_a bounded) xs)
+    | AConstruct (constr_name, fields) ->
+      AConstruct (constr_name, List.map (rename_a bounded) fields)
+    | AArray items -> AArray (List.map (rename_a bounded) items)
+    | ALam (Apat_var v, rhs) -> ALam (Apat_var v, rename_e (v :: bounded) rhs)
+    | ALam (lhs, rhs) -> ALam (lhs, rename_e bounded rhs)
+
+  and rename_c : Ident.t list -> ANF.c_expr -> ANF.c_expr =
+    fun bounded -> function
+    | CApp (x1, x2, xs) ->
+      CApp ((rename_a bounded) x1, (rename_a bounded) x2, List.map (rename_a bounded) xs)
+    | CIte (x1, x2, x3) ->
+      CIte ((rename_c bounded) x1, (rename_e bounded) x2, (rename_e bounded) x3)
+    | CAtom atom -> CAtom (rename_a bounded atom)
+
+  and rename_e : Ident.t list -> ANF.expr -> ANF.expr =
+    fun bounded -> function
+    | ELet (Frontend.Parsetree.NonRecursive, Apat_var v, rhs, body) ->
+      ELet
+        ( Frontend.Parsetree.NonRecursive
+        , Apat_var v
+        , rename_c bounded rhs
+        , rename_e (v :: bounded) body )
+    | ELet (Frontend.Parsetree.Recursive, Apat_var v, rhs, body) ->
+      ELet
+        ( Frontend.Parsetree.Recursive
+        , Apat_var v
+        , rename_c (v :: bounded) rhs
+        , rename_e (v :: bounded) body )
+    | ELet (flg, ((Apat_any | Apat_const _ | Apat_unit) as lhs), rhs, body) ->
+      ELet (flg, lhs, rename_c bounded rhs, rename_e bounded body)
+    | EComplex cexpr -> EComplex (rename_c bounded cexpr)
+  ;;
+
+  let rename_a = rename_a []
+  let rename_c = rename_c []
+  let rename_e = rename_e []
+
+  let rename_stru : ANF.stru -> ANF.stru =
+    let rename_stru_item : ANF.stru_item -> ANF.stru_item = function
+      | ANF.ANF_vb (Frontend.Parsetree.NonRecursive, Apat_var name, rhs) ->
+        let rhs = rename_e rhs in
+        mangle name;
+        let lhs = ANF.Apat_var (find name) in
+        ANF.ANF_vb (Frontend.Parsetree.NonRecursive, lhs, rhs)
+      | ANF.ANF_vb (Frontend.Parsetree.Recursive, Apat_var name, rhs) ->
+        mangle name;
+        let rhs = rename_e rhs in
+        let lhs = ANF.Apat_var (find name) in
+        ANF.ANF_vb (Frontend.Parsetree.Recursive, lhs, rhs)
+      | ANF.ANF_vb (flg, ((Apat_any | Apat_const _ | Apat_unit) as lhs), rhs) ->
+        ANF.ANF_vb (flg, lhs, rename_e rhs)
+    in
+    fun stru -> List.map rename_stru_item stru
+  ;;
+
+  let run_single_test input =
+    match Frontend.Parsing.parse_structure input with
+    | Error err -> Frontend.Parsing.pp_error Format.std_formatter err
+    | Ok ast ->
+      (match Frontend.Inferencer.structure Frontend.Typedtree.empty_table ast with
+       | Error err -> Frontend.Inferencer.pp_error Format.std_formatter err
+       | Ok (_env, typedtree) ->
+         clear ();
+         let anf = ANF.anf_stru typedtree in
+         Format.printf "anf stru:\n";
+         ANF.pp_stru Format.std_formatter anf;
+         Format.printf "\n\nmangled stru:\n";
+         ANF.pp_stru Format.std_formatter (rename_stru anf);
+         Format.printf "\n\nmangled names:\n";
+         pp_mangled_names Format.std_formatter ())
+  ;;
+
+  let%expect_test _ =
+    let input =
+      {|
+        let x' = 10
+        let f () = x'
+        let x' = 20
+        let g () = x'
+      |}
+    in
+    run_single_test input;
+    [%expect
+      {|
+      anf stru:
+      let x' =
+                  10
+                let f weird1 =
+                  let () = weird1 in
+                    x'
+                let x' =
+                  20
+                let g weird2 =
+                  let () = weird2 in
+                    x'
+
+      mangled stru:
+      let x_code39_id105 =
+                                        10
+                                      let f_id106 weird1 =
+                                        let () = weird1 in
+                                          x_code39_id105
+                                      let x_code39_id107 =
+                                        20
+                                      let g_id108 weird2 =
+                                        let () = weird2 in
+                                          x_code39_id107
+
+      mangled names:
+      {
+      	x' ~> x_code39_id107;
+      	x' ~> x_code39_id105;
+      	f ~> f_id106;
+      	g ~> g_id108;
+      } |}]
+  ;;
+end
+
 module Addr_of_var = struct
   (* TODO:
         Addr_of_var looks for
