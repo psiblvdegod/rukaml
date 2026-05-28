@@ -170,6 +170,7 @@ module Addr_of_local = struct
   ;;
 end
 
+(* int stands for formal arity *)
 let stdlib_externs =
   [ 2, "rukaml_alloc_closure"
   ; 1, "rukaml_print_int"
@@ -215,7 +216,8 @@ let stdlib_externs =
 ;;
 
 let stdlib_aliases =
-  [ "printf", "rukaml_alloc_printf_closure"
+  [ "print", "rukaml_print_int_kaml"
+  ; "printf", "rukaml_alloc_printf_closure"
   ; "fprintf", "rukaml_alloc_fprintf_closure"
   ; "sprintf", "rukaml_alloc_sprintf_closure"
   ; "string_len", "rukaml_string_len"
@@ -253,37 +255,33 @@ module Toplevel = struct
 
   type kind =
     | Main (* main: *)
-    | Extern (* labels defined in stdlib_externs *) of { argc : int }
-    | Alias (* aliases for stdlib_externs *) of { aliasee : string }
-    | Function (* .text labels (except main) *) of { argc : int }
+    | Alias of { aliasee : Ident.t }
+    | Function of { argc : int }
     | Immediate of immediate
 
   type t =
-    { id : int
-    ; name : string
+    { ident : Ident.t
     ; kind : kind
     }
 
   type toplevel = t
 
-  (* TODO: should it use Ident.t instead of string ?? *)
-  let store : (string, toplevel) Hashtbl.t = Hashtbl.create 100
-  let contains (ident : Ident.t) = Hashtbl.mem store ident.hum_name
+  let store : (Ident.t, toplevel) Hashtbl.t = Hashtbl.create 100
+  let contains (ident : Ident.t) = Hashtbl.mem store ident
   let has_key = contains
   let is_toplevel = contains
 
   let rec find_opt (ident : Ident.t) =
-    match Hashtbl.find_opt store ident.hum_name with
-    | Some { kind = Alias { aliasee }; _ } -> find_opt (Ident.ident aliasee 0)
+    match Hashtbl.find_opt store ident with
+    | Some { kind = Alias { aliasee }; _ } -> find_opt aliasee
     | x -> x
   ;;
 
   let rec find_exn (ident : Ident.t) =
-    match Hashtbl.find_opt store ident.hum_name with
-    | Some { kind = Alias { aliasee }; _ } -> find_exn (Ident.ident aliasee 0)
+    match Hashtbl.find_opt store ident with
     | Some x -> x
     | None ->
-      log "Can't find toplevel %a" Ident.pp ident;
+      Format.eprintf "Can't find toplevel %a" Ident.pp ident;
       raise Not_found
   ;;
 
@@ -292,24 +290,18 @@ module Toplevel = struct
   let iter_immediates f = Queue.iter f __immediates
 
   let extend (ident : Ident.t) ~kind =
-    let toplevel = { id = ident.id; name = ident.hum_name; kind } in
-    Hashtbl.add store ident.hum_name toplevel;
+    let toplevel = { ident; kind } in
+    Hashtbl.add store ident toplevel;
     match kind with
     | Immediate _ -> Queue.add toplevel __immediates
     | _ -> ()
   ;;
 
-  (* TODO: figure out how to guarantee label uniqueness *)
-  let pp_toplevel_label ppf { id; name; kind } =
-    (* TODO?: can names collide after this replacement ? *)
-    let name = Str.global_replace (Str.regexp "'") "_" name in
+  let rec pp_toplevel_label ppf { ident; kind } =
     match kind with
-    | Alias { aliasee } -> Format.fprintf ppf "%s" aliasee
-    | Extern _ | Main -> Format.fprintf ppf "%s" name
-    | Function _ -> Format.fprintf ppf "%s__0%d" name id
-    | Immediate Constant -> Format.fprintf ppf "%s__1%d" name id
-    | Immediate Eval -> Format.fprintf ppf "%s__2%d" name id
-    | Immediate Match -> Format.fprintf ppf "%s__3%d" name id
+    | Main -> Format.fprintf ppf "main"
+    | Alias { aliasee } -> pp_toplevel_label ppf (find_exn aliasee)
+    | _ -> Ident.pp ppf ident
   ;;
 
   let pp_label_exn ppf (ident : Ident.t) =
@@ -339,169 +331,21 @@ module Toplevel = struct
     | Some { kind = Main; _ } -> true
     | _ -> false
   ;;
+
+  (* TODO: it is not the best way to resolve aliases *)
+  let resolve_alias (ident : Ident.t) =
+    match find_exn ident with
+    | { kind = Alias { aliasee }; _ } -> aliasee
+    | { ident; _ } -> ident
+  ;;
 end
 
 module Mangling = struct
-  let mangled_names : (Ident.t, Ident.t) Hashtbl.t = Hashtbl.create 100
-
-  let mangle (ident : Ident.t) =
-    let buf = Buffer.create (String.length ident.hum_name) in
-    String.iter
-      (fun c ->
-         match c with
-         | 'A' .. 'Z' | 'a' .. 'z' | '0' .. '9' | '_' -> Buffer.add_char buf c
-         | _ ->
-           (* TODO: names may collide after this substitution *)
-           Printf.bprintf buf "_code%u" (Char.code c))
-      ident.hum_name;
-    Buffer.add_string buf (Format.asprintf "_id%d" ident.id);
-    Hashtbl.replace mangled_names ident (Ident.ident (Buffer.contents buf) ident.id)
-  ;;
-
-  let contains (ident : Ident.t) = Hashtbl.mem mangled_names ident
-  let find (ident : Ident.t) = Hashtbl.find mangled_names ident
-  let clear () = Hashtbl.clear mangled_names
-
-  let pp_mangled_names ppf () =
-    Format.fprintf ppf "{\n";
-    Hashtbl.iter
-      (fun k v -> Format.fprintf ppf "\t%a ~> %a;\n" Ident.pp k Ident.pp v)
-      mangled_names;
-    Format.fprintf ppf "}"
-  ;;
-
-  let%expect_test _ =
-    mangle (Ident.ident "let*>" 42);
-    pp_mangled_names Format.std_formatter ();
-    [%expect
-      {|
-      {
-      	let*> ~> let_code42_code62_id42;
-      } |}]
-  ;;
-
-  let rec rename_a : Ident.t list -> ANF.imm_expr -> ANF.imm_expr =
-    fun bounded -> function
-    | (AUnit | AConst _ | APrimitive _) as i -> i
-    | AVar v when contains v && not (List.mem v bounded) -> AVar (find v)
-    | AVar _ as i -> i
-    | ATuple (x1, x2, xs) ->
-      ATuple (rename_a bounded x1, rename_a bounded x2, List.map (rename_a bounded) xs)
-    | AConstruct (constr_name, fields) ->
-      AConstruct (constr_name, List.map (rename_a bounded) fields)
-    | AArray items -> AArray (List.map (rename_a bounded) items)
-    | ALam (Apat_var v, rhs) -> ALam (Apat_var v, rename_e (v :: bounded) rhs)
-    | ALam (lhs, rhs) -> ALam (lhs, rename_e bounded rhs)
-
-  and rename_c : Ident.t list -> ANF.c_expr -> ANF.c_expr =
-    fun bounded -> function
-    | CApp (x1, x2, xs) ->
-      CApp ((rename_a bounded) x1, (rename_a bounded) x2, List.map (rename_a bounded) xs)
-    | CIte (x1, x2, x3) ->
-      CIte ((rename_c bounded) x1, (rename_e bounded) x2, (rename_e bounded) x3)
-    | CAtom atom -> CAtom (rename_a bounded atom)
-
-  and rename_e : Ident.t list -> ANF.expr -> ANF.expr =
-    fun bounded -> function
-    | ELet (Frontend.Parsetree.NonRecursive, Apat_var v, rhs, body) ->
-      ELet
-        ( Frontend.Parsetree.NonRecursive
-        , Apat_var v
-        , rename_c bounded rhs
-        , rename_e (v :: bounded) body )
-    | ELet (Frontend.Parsetree.Recursive, Apat_var v, rhs, body) ->
-      ELet
-        ( Frontend.Parsetree.Recursive
-        , Apat_var v
-        , rename_c (v :: bounded) rhs
-        , rename_e (v :: bounded) body )
-    | ELet (flg, ((Apat_any | Apat_const _ | Apat_unit) as lhs), rhs, body) ->
-      ELet (flg, lhs, rename_c bounded rhs, rename_e bounded body)
-    | EComplex cexpr -> EComplex (rename_c bounded cexpr)
-  ;;
-
-  let rename_a = rename_a []
-  let rename_c = rename_c []
-  let rename_e = rename_e []
-
-  let rename_stru : ANF.stru -> ANF.stru =
-    let rename_stru_item : ANF.stru_item -> ANF.stru_item = function
-      | ANF.ANF_vb (Frontend.Parsetree.NonRecursive, Apat_var name, rhs) ->
-        let rhs = rename_e rhs in
-        mangle name;
-        let lhs = ANF.Apat_var (find name) in
-        ANF.ANF_vb (Frontend.Parsetree.NonRecursive, lhs, rhs)
-      | ANF.ANF_vb (Frontend.Parsetree.Recursive, Apat_var name, rhs) ->
-        mangle name;
-        let rhs = rename_e rhs in
-        let lhs = ANF.Apat_var (find name) in
-        ANF.ANF_vb (Frontend.Parsetree.Recursive, lhs, rhs)
-      | ANF.ANF_vb (flg, ((Apat_any | Apat_const _ | Apat_unit) as lhs), rhs) ->
-        ANF.ANF_vb (flg, lhs, rename_e rhs)
-    in
-    fun stru -> List.map rename_stru_item stru
-  ;;
-
-  let run_single_test input =
-    match Frontend.Parsing.parse_structure input with
-    | Error err -> Frontend.Parsing.pp_error Format.std_formatter err
-    | Ok ast ->
-      (match Frontend.Inferencer.structure Frontend.Typedtree.empty_table ast with
-       | Error err -> Frontend.Inferencer.pp_error Format.std_formatter err
-       | Ok (_env, typedtree) ->
-         clear ();
-         let anf = ANF.anf_stru typedtree in
-         Format.printf "anf stru:\n";
-         ANF.pp_stru Format.std_formatter anf;
-         Format.printf "\n\nmangled stru:\n";
-         ANF.pp_stru Format.std_formatter (rename_stru anf);
-         Format.printf "\n\nmangled names:\n";
-         pp_mangled_names Format.std_formatter ())
-  ;;
-
-  let%expect_test _ =
-    let input =
-      {|
-        let x' = 10
-        let f () = x'
-        let x' = 20
-        let g () = x'
-      |}
-    in
-    run_single_test input;
-    [%expect
-      {|
-      anf stru:
-      let x' =
-                  10
-                let f weird1 =
-                  let () = weird1 in
-                    x'
-                let x' =
-                  20
-                let g weird2 =
-                  let () = weird2 in
-                    x'
-
-      mangled stru:
-      let x_code39_id105 =
-                                        10
-                                      let f_id106 weird1 =
-                                        let () = weird1 in
-                                          x_code39_id105
-                                      let x_code39_id107 =
-                                        20
-                                      let g_id108 weird2 =
-                                        let () = weird2 in
-                                          x_code39_id107
-
-      mangled names:
-      {
-      	x' ~> x_code39_id107;
-      	x' ~> x_code39_id105;
-      	f ~> f_id106;
-      	g ~> g_id108;
-      } |}]
+  let initially_bounded =
+    (* main, stdlib_externs and aliases for them are initially bounded identifiers *)
+    [ Ident.ident "main" 0 ]
+    @ List.map (fun (_argc, ident) -> Ident.ident ident 0) stdlib_externs
+    @ List.map (fun (alias, _aliasee) -> Ident.ident alias 0) stdlib_aliases
   ;;
 end
 
@@ -523,29 +367,7 @@ module Addr_of_var = struct
   ;;
 
   let is_defined (ident : Ident.t) = Addr_of_local.has_key ident || Toplevel.has_key ident
-
-  let is_builtin (ident : Ident.t) =
-    match Toplevel.find_opt ident with
-    | Some { kind = Extern _; _ } when not (Addr_of_local.has_key ident) -> true
-    | _ -> false
-  ;;
-
-  (* resolves aliases *)
-  let real_name_exn (ident : Ident.t) = (Toplevel.find_exn ident).name
-  let builtin_realname_exn (name : string) = (Toplevel.find_exn (Ident.ident name 0)).name
-
-  let resolve_primitive name =
-    match List.assoc_opt name stdlib_aliases with
-    | Some real_name -> real_name
-    | None ->
-      Format.eprintf "error: can not resolve %s" name;
-      raise Not_found
-  ;;
 end
-
-let is_builtin, real_name_exn, builtin_realname_exn =
-  Addr_of_var.(is_builtin, real_name_exn, builtin_realname_exn)
-;;
 
 let pp_dest ppf = function
   | DDiscard -> fprintf ppf "[rukaml_discard]"
@@ -657,24 +479,18 @@ let rec generate_body ppf body =
         printfn ppf "  mov qword [rsp%+d*8], rax" (count - 1 - i)
       | AVar vname when is_toplevel vname ->
         (match Toplevel.find_exn vname with
-         (* notice : do not use vname below (because of aliases) *)
-         | { kind = Function { argc }; name; id } ->
+         | { kind = Function { argc = 0 }; ident } ->
+           printfn ppf "  call %a" Ident.pp ident;
+           printfn ppf "  mov qword [rsp+%d*8], rax" (count - 1 - i)
+         | { kind = Function { argc }; ident = fname } ->
            assert (argc > 0);
-           emit_alloc_closure ppf ~fname:(Ident.ident name id) ~argc;
-           printfn ppf "  mov qword [rsp%+d*8], rax ; arg \"%s\"" (count - 1 - i) name
-         | { kind = Immediate Constant; name; id } ->
-           printfn ppf "  mov rax, %a" Toplevel.pp_toplevel_exn (Ident.ident name id);
+           emit_alloc_closure ppf ~fname ~argc;
+           printfn ppf "  mov qword [rsp%+d*8], rax" (count - 1 - i)
+         | { kind = Immediate Constant; ident } ->
+           printfn ppf "  mov rax, %a" Toplevel.pp_toplevel_exn ident;
            printfn ppf "  mov qword [rsp+%d*8], rax" (count - 1 - i)
-         | { kind = Extern { argc = 0 }; name; _ } ->
-           (* TODO: is it correct? *)
-           printfn ppf "  call %s" name;
-           printfn ppf "  mov qword [rsp+%d*8], rax" (count - 1 - i)
-         | { kind = Extern { argc }; name; id } ->
-           assert (argc > 0);
-           emit_alloc_closure ppf ~fname:(Ident.ident name id) ~argc;
-           printfn ppf "  mov qword [rsp+%d*8], rax" (count - 1 - i)
-         | { kind = Alias _; _ } -> assert false
          | { kind = Main; _ } -> assert false
+         | { kind = Alias _; _ } -> assert false
          | { kind = Immediate Eval; _ } -> assert false
          | { kind = Immediate Match; _ } -> assert false)
       | APrimitive ("stdin", 0) ->
@@ -700,7 +516,7 @@ let rec generate_body ppf body =
         printfn ppf "  mov qword [rsp%+d*8], r8" (count - 1 - i)
       | ALam _ -> failwith "Should it be representable in ANF?"
       | APrimitive ("print", (1 as argc)) ->
-        emit_alloc_closure ppf ~fname:(Ident.of_string "rukaml_print_int_kaml") ~argc;
+        emit_alloc_closure ppf ~fname:(Ident.ident "rukaml_print_int_kaml" 0) ~argc;
         printfn ppf "  mov qword [rsp%+d*8], rax" (count - 1 - i)
       | AConstruct (tag, []) ->
         printfn ppf "  mov qword [rsp%+d*8], %d" (count - 1 - i) tag
@@ -846,36 +662,6 @@ let rec generate_body ppf body =
          printfn ppf "  mov %a, r11" pp_dest dest
        | AConst (PConst_char c) ->
          printfn ppf "  mov qword %a, %d" pp_dest dest (Char.code c)
-       | _ -> failwith "Should not happen")
-    | CApp (AVar f, arg1, [])
-    (* TODO(Kakadu): change to builtin *)
-      when f.Ident.hum_name = "print" && Addr_of_var.is_builtin f ->
-      (match arg1 with
-       | AVar v when Addr_of_var.is_defined v ->
-         let name1 = Ident.of_string @@ gen_name ~prefix:"pad" () in
-         let name2 = Ident.of_string @@ gen_name ~prefix:"print_arg" () in
-         Addr_of_local.extend name1;
-         Addr_of_local.extend name2;
-         printfn ppf "  add rsp, -8*2";
-         printfn ppf "  mov r11, %a" Addr_of_var.pp_var_exn v;
-         printfn ppf "  mov qword [rsp], r11";
-         printfn ppf "  call rukaml_print_int ; short";
-         printfn ppf "  add rsp, 8*2";
-         Addr_of_local.remove_local name2;
-         Addr_of_local.remove_local name1;
-         printfn ppf "  mov %a, rax" pp_dest dest
-       | AConst (PConst_int n) ->
-         let name1 = Ident.of_string @@ gen_name ~prefix:"pad" () in
-         let name2 = Ident.of_string @@ gen_name ~prefix:"print_arg" () in
-         Addr_of_local.extend name1;
-         Addr_of_local.extend name2;
-         printfn ppf "  add rsp, -8*2";
-         printfn ppf "  mov qword %a, %d" Addr_of_var.pp_var_exn name2 n;
-         printfn ppf "  call rukaml_print_int";
-         printfn ppf "  add rsp, 8*2";
-         Addr_of_local.remove_local name2;
-         Addr_of_local.remove_local name1;
-         printfn ppf "  mov %a, rax" pp_dest dest
        | _ -> failwith "Should not happen")
     | CApp (APrimitive ("=", 2), AConst (PConst_int l), [ AConst (PConst_int r) ]) ->
       if l = r
@@ -1165,8 +951,8 @@ let rec generate_body ppf body =
       printfn ppf "  mov qword %a,  %d" pp_dest dest n
     | AConst (Frontend.Parsetree.PConst_char c) ->
       printfn ppf "  mov qword %a,  %d" pp_dest dest (Char.code c)
-    | AVar ({ Ident.hum_name = "print"; _ } as v) when Addr_of_var.is_builtin v ->
-      emit_alloc_closure ppf ~fname:(Ident.of_string "rukaml_print_int") ~argc:1;
+    | APrimitive ("print", 1) ->
+      emit_alloc_closure ppf ~fname:(Ident.ident "rukaml_print_int_kaml" 0) ~argc:1;
       printfn ppf "  mov %a, rax" pp_dest dest
     | APrimitive ("stdin", 0) ->
       printfn ppf "  call rukaml_stdin";
@@ -1198,24 +984,19 @@ let rec generate_body ppf body =
     | AVar vname when Toplevel.is_toplevel vname ->
       (* TODO : revisit it !!! *)
       (match Toplevel.find_exn vname with
-       (* notice: do not use vname below (because of aliases) *)
-       | { kind = Function { argc }; name; id } ->
-         assert (argc > 0);
-         emit_alloc_closure ppf ~fname:(Ident.ident name id) ~argc;
-         printfn ppf "  mov %a, rax" pp_dest dest
-       | { kind = Immediate Constant; name; id } ->
-         printfn ppf "  mov rax, %a" Toplevel.pp_toplevel_exn (Ident.ident name id);
-         printfn ppf "  mov qword %a, rax" pp_dest dest
-       | { kind = Extern { argc = 0 }; name; _ } ->
+       | { kind = Function { argc = 0 }; ident } ->
          (* TODO: it is weird *)
-         printfn ppf "  call %s" name;
+         printfn ppf "  call %a" Ident.pp ident;
          printfn ppf "  mov %a, rax" pp_dest dest
-       | { kind = Extern { argc }; name; id } ->
+       | { kind = Function { argc }; ident = fname } ->
          assert (argc > 0);
-         emit_alloc_closure ppf ~fname:(Ident.ident name id) ~argc;
+         emit_alloc_closure ppf ~fname ~argc;
          printfn ppf "  mov %a, rax" pp_dest dest
-       | { kind = Alias _; _ } -> assert false
+       | { kind = Immediate Constant; ident } ->
+         printfn ppf "  mov rax, %a" Toplevel.pp_toplevel_exn ident;
+         printfn ppf "  mov qword %a, rax" pp_dest dest
        | { kind = Main; _ } -> assert false
+       | { kind = Alias _; _ } -> assert false
        | { kind = Immediate Eval; _ } -> assert false
        | { kind = Immediate Match; _ } -> assert false)
     | AConstruct (tag, []) -> printfn ppf "  mov qword %a, %d" pp_dest dest tag
@@ -1224,9 +1005,6 @@ let rec generate_body ppf body =
       emit_initialize_block dest ~fields:(x1 :: x2 :: xs) ~tag:0 ~name:"tuple"
     | AArray fields -> emit_initialize_block dest ~fields ~tag:1 ~name:"array"
     | APrimitive ("match_failure", _) -> printfn ppf "  call rukaml_match_failure"
-    | APrimitive ("print", (1 as argc)) ->
-      emit_alloc_closure ppf ~fname:(Ident.of_string "rukaml_print_int_kaml") ~argc;
-      printfn ppf "  mov %a, rax" pp_dest dest
     | AConst (PConst_string s) ->
       (* notice: DO NOT use emit_initialize_block here. strings representation differs *)
       let payload_words_n = (String.length s + 7) / 8 in
@@ -1289,20 +1067,26 @@ let rec generate_body ppf body =
     Addr_of_local.remove_local name1;
     printfn ppf "  mov %a, rax" pp_dest dest
   and emit_rukaml_apply1 dest ~fname ~arg =
-    let fname = Addr_of_var.resolve_primitive fname in
+    let fident =
+      (* TODO : definitely it is not the best way to resolve aliases *)
+      Toplevel.resolve_alias (Ident.ident fname 0)
+    in
     match arg with
     | ANF.AVar v when Addr_of_var.is_defined v ->
-      printfn ppf "  mov rdi, %s" fname;
+      printfn ppf "  mov rdi, %a" Ident.pp fident;
       printfn ppf "  mov rsi, %a" Addr_of_var.pp_var_exn v;
       printfn ppf "  call rukaml_apply1";
       printfn ppf "  mov %a, rax" pp_dest dest
     | _ ->
       helper_a (DReg "rsi") arg;
-      printfn ppf "  mov rdi, %s" fname;
+      printfn ppf "  mov rdi, %a" Ident.pp fident;
       printfn ppf "  call rukaml_apply1";
       printfn ppf "  mov %a, rax" pp_dest dest
   and emit_rukaml_apply2 dest ~fname ~arg1 ~arg2 =
-    let fname = Addr_of_var.resolve_primitive fname in
+    let fident =
+      (* TODO : definitely it is not the best way to resolve aliases *)
+      Toplevel.resolve_alias (Ident.ident fname 0)
+    in
     (match arg1, arg2 with
      | ANF.AVar v1, ANF.AVar v2 ->
        printfn ppf "  mov rsi, %a" Addr_of_var.pp_var_exn v1;
@@ -1320,15 +1104,18 @@ let rec generate_body ppf body =
        helper_a (DReg "rdx") arg2;
        printfn ppf "  mov qword rsi, [rsp]";
        printfn ppf "  add rsp, 8*2");
-    printfn ppf "  mov rdi, %s" fname;
+    printfn ppf "  mov rdi, %a" Ident.pp fident;
     printfn ppf "  call rukaml_apply1";
     printfn ppf "  mov %a, rax" pp_dest dest
   and emit_rukaml_applyN dest ~fname ~argc ~arg1 =
-    let fname = Addr_of_var.resolve_primitive fname in
+    let fident =
+      (* TODO : definitely it is not the best way to resolve aliases *)
+      Toplevel.resolve_alias (Ident.ident fname 0)
+    in
     assert (argc > 1);
     match arg1 with
     | ANF.AVar v when Addr_of_var.is_defined v ->
-      printfn ppf "  mov rdi, %s" fname;
+      printfn ppf "  mov rdi, %a" Ident.pp fident;
       printfn ppf "  mov rsi, %d" argc;
       printfn ppf "  call rukaml_alloc_closure";
       printfn ppf "  mov rdi, rax";
@@ -1338,7 +1125,7 @@ let rec generate_body ppf body =
       printfn ppf "  call rukaml_applyN";
       printfn ppf "  mov %a, rax" pp_dest dest
     | _ ->
-      printfn ppf "  mov rdi, %s" fname;
+      printfn ppf "  mov rdi, %a" Ident.pp fident;
       printfn ppf "  mov rsi, %d" argc;
       printfn ppf "  call rukaml_alloc_closure";
       let name1 = Ident.of_string @@ gen_name ~prefix:"pad" () in
@@ -1410,12 +1197,14 @@ let use_custom_main = false
 let put_init_stdlib ppf =
   List.iter
     (fun (argc, name) ->
-       Toplevel.extend (Ident.ident name 0) ~kind:(Extern { argc });
+       Toplevel.extend (Ident.ident name 0) ~kind:(Function { argc });
        printfn ppf "extern %s" name)
     stdlib_externs;
   List.iter
-    (fun (alias, aliasee) ->
-       Toplevel.extend (Ident.ident alias 0) ~kind:(Alias { aliasee }))
+    (fun (alias, _aliasee) ->
+       Toplevel.extend
+         (Ident.ident alias 0)
+         ~kind:(Alias { aliasee = Ident.ident _aliasee 0 }))
     stdlib_aliases
 ;;
 
@@ -1424,8 +1213,8 @@ let put_init_global_immediates ppf =
   printfn ppf "rukaml_init_global_immediates:";
   printfn ppf "  push rbp";
   printfn ppf "  mov rbp, rsp";
-  Toplevel.iter_immediates (fun { id; name; _ } ->
-    printfn ppf "  call init_%a" Toplevel.pp_label_exn (Ident.ident name id));
+  Toplevel.iter_immediates (fun { ident; _ } ->
+    printfn ppf "  call init_%a" Toplevel.pp_label_exn ident);
   printfn ppf "  pop rbp";
   printfn ppf "  ret ;;; rukaml_init_global_immediates"
 ;;
@@ -1570,6 +1359,10 @@ let put_discard ppf =
 let codegen ?(wrap_main_into_start = true) anf file =
   (* log "Going to generate code here %s %d" __FUNCTION__ __LINE__; *)
   log "ANF: @[%a@]" Compile_lib.ANF.pp_stru anf;
+  let anf =
+    Compile_lib.Mangling.expand_aliases_stru ~aliases:stdlib_aliases ~bounded:[] anf
+  in
+  let anf = Compile_lib.Mangling.rename_stru ~bounded:Mangling.initially_bounded anf in
   Stdio.Out_channel.with_file file ~f:(fun ch ->
     let ppf = Format.formatter_of_out_channel ch in
     printfn ppf "section .note.GNU-stack noalloc noexec nowrite progbits";
@@ -1623,7 +1416,8 @@ section .text
     let open Compile_lib in
     anf
     |> List.iter (function
-      | ANF.ANF_vb (_flg, Apat_var ({ hum_name = "main"; _ } as name), body) ->
+      | ANF.ANF_vb (_flg, Apat_var { hum_name = "main"; _ }, body) ->
+        let name = Ident.ident "main" 0 in
         Toplevel.extend name ~kind:Main;
         emit_global_function ppf name body
       | ANF.ANF_vb (_flg, Apat_var name, body) ->
