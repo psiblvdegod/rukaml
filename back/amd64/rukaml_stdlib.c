@@ -1,18 +1,18 @@
-#include <stdlib.h>
-#include <stdio.h>
-#include <inttypes.h>
-#include <stdint.h>
-#include <string.h>
-#include <stdarg.h>
 #include <assert.h>
+#include <inttypes.h>
+#include <stdarg.h>
 #include <stdbool.h>
-#include <errno.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 #include "rukaml_stdlib.h"
 
 /* #define clean_errno() (errno == 0 ? "None" : strerror(errno))
-#define log_error(M, ...) fprintf(stderr, "[ERROR] (%s:%d: errno: %s) " M "\n", __FILE__, __LINE__, clean_errno(), ##__VA_ARGS__)
+#define log_error(M, ...) fprintf(stderr, "[ERROR] (%s:%d: errno: %s) " M "\n",
+__FILE__, __LINE__, clean_errno(), ##__VA_ARGS__)
 #define assertf(A, M, ...)       \
   if (!(A))                      \
   {                              \
@@ -24,7 +24,7 @@
 #define DEBUG
 #undef DEBUG
 
-static uint64_t log_level = 0;
+static uint64_t log_level = 0x0;
 
 #define logGC(...)       \
   if (log_level & 0x800) \
@@ -42,17 +42,42 @@ static uint64_t log_level = 0;
 
 #define MAX_STRING_FROM_STDIN (2 << 15)
 
-int HEAP_SIZE = 256 * 1024 * 1024; // 256 MiB
+int HEAP_SIZE = 1024 * 16;
 const uint8_t Tuple_tag = 0;
 const uint8_t Array_tag = 1;
 const uint8_t Forward_tag = 250;
 const uint8_t String_tag = 252;
+
+void __mk_err_fatal(const char *file, int line, const char *msg)
+{
+  fprintf(stderr, "[fatal] file=%s line=%d msg=\"%s\"\n", file, line, msg);
+  fflush(stderr);
+  exit(1);
+}
+
+void __mk_err_warning(const char *file, int line, const char *msg)
+{
+  fprintf(stderr, "[warning] file=%s line=%d msg=\"%s\"\n", file, line, msg);
+}
+
+#define mk_err_fatal(msg) __mk_err_fatal(__FILE__, __LINE__, msg)
+#define mk_err_warning(msg) __mk_err_warning(__FILE__, __LINE__, msg)
 
 struct gc_stats
 {
   uint64_t gs_allocated_words; // allocated from beginning of the program
   uint64_t gs_current_bank;    // 0 = first bank, 1 = second
 };
+
+#define INITIAL_GC_STATIC_ROOTS_CAPACITY 64
+
+struct gc_static_roots
+{
+  uint64_t counter;
+  uint64_t capacity;
+  uint64_t **roots;
+};
+
 struct gc_data
 {
   uint64_t ebp;
@@ -62,9 +87,53 @@ struct gc_data
   uint64_t *backup_bank_fin;
   uint64_t allocated_words; // currently allocated
   struct gc_stats stats;
+  struct gc_static_roots static_roots;
 };
 
-static struct gc_data GC = {.ebp = 0, .allocated_words = 0, .stats = {.gs_allocated_words = 0}};
+static struct gc_data GC = {
+    .ebp = 0, .allocated_words = 0, .stats = {.gs_allocated_words = 0},
+    // .static_roots is not compile-time constant, so it is not initialized here
+};
+
+void initialize_gc_static_roots()
+{
+  GC.static_roots.capacity = INITIAL_GC_STATIC_ROOTS_CAPACITY;
+  GC.static_roots.roots = (uint64_t **)(calloc(INITIAL_GC_STATIC_ROOTS_CAPACITY,
+                                               sizeof(uint64_t *)));
+  if (GC.static_roots.roots == NULL)
+  {
+    mk_err_fatal("memory allocation failed");
+  }
+  GC.static_roots.counter = 0;
+}
+
+void teardown_gc_static_roots()
+{
+  free(GC.static_roots.roots);
+}
+
+// TODO! (memory leak)
+//  gc roots can not only be added but also disappear, at least in two cases:
+//  1. shadowing of a global variable
+//  2. mutation of a global variable
+//  some mechanism for removing static roots is needed
+void add_gc_static_root(void **static_root)
+{
+  if (GC.static_roots.counter >= GC.static_roots.capacity)
+  {
+    uint64_t new_capacity = GC.static_roots.capacity * 2;
+    uint64_t **new_roots = (uint64_t **)realloc(
+        GC.static_roots.roots, new_capacity * sizeof(uint64_t *));
+    if (new_roots == NULL)
+    {
+      mk_err_fatal("memory allocation failed");
+    }
+    GC.static_roots.capacity = new_capacity;
+    GC.static_roots.roots = new_roots;
+  }
+
+  GC.static_roots.roots[GC.static_roots.counter++] = (uint64_t *)static_root;
+}
 
 uint64_t allocated_closures = 0;
 
@@ -87,8 +156,13 @@ static void *rukaml_string_of_cstr(const char *cstr)
 
 void rukaml_init_argv(int argc, char **argv)
 {
+  if (argc < 1)
+  {
+    mk_err_fatal("argc < 1");
+  }
+
 #ifdef DEBUG
-  printf("[rukaml_init_argv] argc = %d\n", argc);
+  printf("[debug] rukaml initialization: argc = %d\n", argc);
 #endif
 
   void **arr = (void **)rukaml_alloc_block(argc, Array_tag);
@@ -96,7 +170,7 @@ void rukaml_init_argv(int argc, char **argv)
   {
     char *nth = rukaml_string_of_cstr(argv[n]);
 #ifdef DEBUG
-    printf("[rukaml_init_argv] argv[%d] = %s\n", n, nth);
+    printf("[debug] rukaml initialization: argv[%d] = %s\n", n, nth);
 #endif
     arr[n] = nth;
   }
@@ -146,15 +220,21 @@ void rukaml_initialize(uint64_t ebp, int argc, char **argv)
   logGC("%s. EBP=0x%lX\n", __func__, GC.ebp);
   const uint64_t size = sizeof(uint64_t *) * HEAP_SIZE;
   GC.main_bank = malloc(size);
-  GC.main_bank_fin = GC.main_bank + size;
-  GC.backup_bank = malloc(sizeof(uint64_t *) * HEAP_SIZE);
-  GC.backup_bank_fin = GC.backup_bank + size;
+  GC.main_bank_fin = GC.main_bank + HEAP_SIZE;
+  GC.backup_bank = malloc(size);
+  GC.backup_bank_fin = GC.backup_bank + HEAP_SIZE;
   GC.allocated_words = 0;
   GC.stats.gs_current_bank = 0;
-  logGC("main   bank: 0x%lX..0x%lX\n", (uint64_t)GC.main_bank, (uint64_t)GC.main_bank_fin);
-  logGC("backup bank: 0x%lX..0x%lX\n", (uint64_t)GC.backup_bank, (uint64_t)GC.backup_bank_fin);
+  logGC("main   bank: 0x%lX..0x%lX\n", (uint64_t)GC.main_bank,
+        (uint64_t)GC.main_bank_fin);
+  logGC("backup bank: 0x%lX..0x%lX\n", (uint64_t)GC.backup_bank,
+        (uint64_t)GC.backup_bank_fin);
 
+  initialize_gc_static_roots();
   rukaml_init_argv(argc, argv);
+  add_gc_static_root(&rukaml_sys_argv); // sys_argv needs to be a static root
+  ;                                     // because it's allocated via rukaml_alloc_block
+  ;                                     // otherwise GC may collect its block.
 }
 
 static bool is_old_bank(uint64_t *ptr)
@@ -173,66 +253,71 @@ void dfs(uint64_t *allocated, uint64_t *root)
     return;
   if (!is_old_bank(root))
     return;
-
   uint8_t tag = TAG(root);
   logGC("%s root = 0x%lX, tag = %u\n", __func__, (uint64_t)root, tag);
   if (tag == Forward_tag)
     return;
   uint64_t size = SIZE(root);
   assert(size >= 1);
-  uint64_t *new_loc = (uint64_t *)GC.backup_bank + *allocated;
-  logGC("new_loc = 0x%lX\n", (uint64_t)new_loc);
-  *new_loc = HEADER(size, tag);
+  uint64_t *new_hdr = (uint64_t *)GC.backup_bank + *allocated;
   *allocated += size + 1;
-
-  uint64_t first_child_ptr = *root;
-
-  logGC("Copying %lX to %lX\n", (uint64_t)root, (uint64_t)new_loc);
+  // copy header + all fields
+  memcpy(new_hdr, root - 1, (size + 1) * sizeof(uint64_t));
+  logGC("Copying %lX to %lX\n", (uint64_t)root, (uint64_t)(new_hdr + 1));
+  // write forwarding pointer in old location
   root[-1] = HEADER(1, Forward_tag);
-  root[0] = (uint64_t)new_loc;
-
-  dfs(allocated, (uint64_t *)first_child_ptr);
-  for (uint8_t i = 1; i < size; ++i)
-    dfs(allocated, (uint64_t *)(*(root + i)));
+  root[0] = (uint64_t)(new_hdr + 1);
+  // evacuate children and update fields in the new copy
+  for (uint8_t i = 0; i < size; ++i)
+  {
+    uint64_t *child = (uint64_t *)new_hdr[1 + i];
+    if (is_old_bank(child))
+    {
+      if (TAG(child) != Forward_tag)
+        dfs(allocated, child);
+      new_hdr[1 + i] = child[0]; // update to new location
+    }
+  }
   logGC("%s root = 0x%lX finished\n", __func__, (uint64_t)root);
 }
 
 void rukaml_gc_compact(uint64_t rsp)
 {
-  assert(GC.ebp > rsp);
+  assert(GC.ebp >= rsp);
   logGC("=== %s. EBP=0x%lX, RSP=0x%lX\n", __func__, GC.ebp, rsp);
   logGC("stack width = 0x%lX / 8\n", GC.ebp - rsp);
-
   uint64_t cur = GC.ebp;
   uint64_t new_size = 0;
-  while (cur > rsp)
+  // scan stack
+  while (cur >= rsp)
   {
-    // looking for pointers, that are in the current bank
-    int64_t obj = *((uint64_t *)cur);
+    int64_t obj = *((int64_t *)cur);
     cur -= 8;
-
     if ((uint64_t)GC.main_bank <= obj && obj < (uint64_t)GC.main_bank_fin)
     {
       logGC("\t0x%lX a candidate?\n", obj);
-      dfs(&new_size, (uint64_t *)obj);
+      uint64_t *obj_ptr = (uint64_t *)obj;
+      if (TAG(obj_ptr) != Forward_tag)
+        dfs(&new_size, obj_ptr);
+      // update stack slot with forwarded address
+      *(uint64_t *)(cur + 1) = obj_ptr[0];
     }
   }
-  // cur = GC.ebp;
 
-  //
-  // while (cur > rsp)
-  // {
-  //   // looking for pointers, that are in the current bank
-  //   int64_t obj = *((uint64_t *)cur);
-  //   // printf("obj = 0x%lX, addr = 0x%lX\n", obj, cur);
-  //   cur -= 8;
+  // begin static roots walking
+  for (uint64_t i = 0; i < GC.static_roots.counter; i++)
+  {
+    uint64_t *root_slot = GC.static_roots.roots[i];
+    uint64_t val = *root_slot;
+    if (!is_old_bank((uint64_t *)val))
+      continue;
+    uint64_t *obj = (uint64_t *)val;
+    if (TAG(obj) != Forward_tag)
+      dfs(&new_size, obj);
+    *root_slot = obj[0];
+  }
+  // end static roots walking
 
-  //   if ((uint64_t)GC.main_bank <= obj && obj < (uint64_t)GC.main_bank_fin)
-  //   {
-  //     printf("\t0x%lX a candidate?\n", obj);
-  //     dfs(&new_size, (uint64_t *)obj);
-  //   }
-  // }
   GC.allocated_words = new_size;
 }
 
@@ -251,7 +336,8 @@ void rukaml_print_alloc_closure_count(void)
   fflush(stdout);
 }
 
-// TODO: implement tagged int's to distinguish immediate values from heap blocks properly
+// TODO: implement tagged int's to distinguish immediate values from heap blocks
+// properly
 
 // good implementation:
 // #define IS_IMM(v) (((uint64_t)(v) & 1) == 1)
@@ -325,21 +411,6 @@ void **rukaml_array_read_in(int a0, int a1, int a2, int a3, int a4, int a5,
   fclose(fp);
   return arr;
 }
-
-void __mk_err_fatal(const char *file, int line, const char *msg)
-{
-  fprintf(stderr, "[fatal] file=%s line=%d msg=\"%s\"\n", file, line, msg);
-  fflush(stderr);
-  exit(1);
-}
-
-void __mk_err_warning(const char *file, int line, const char *msg)
-{
-  fprintf(stderr, "[warning] file=%s line=%d msg=\"%s\"\n", file, line, msg);
-}
-
-#define mk_err_fatal(msg) __mk_err_fatal(__FILE__, __LINE__, msg)
-#define mk_err_warning(msg) __mk_err_warning(__FILE__, __LINE__, msg)
 
 void rukaml_array_set(int a0, int a1, int a2, int a3, int a4, int a5,
                       void **arr, uint64_t n, void *a)
@@ -420,7 +491,7 @@ void *rukaml_alloc_block(uint64_t size, uint64_t tag)
   {
     mk_err_fatal("Not enough memory");
   }
-  uint64_t **rez = ((uint64_t **)(GC.main_bank + GC.allocated_words * sizeof(void *)));
+  uint64_t **rez = (uint64_t **)(GC.main_bank + GC.allocated_words);
   GC.allocated_words += size + 1;
   GC.stats.gs_allocated_words += size + 1;
   *rez = (uint64_t *)HEADER(size, tag);
@@ -457,12 +528,6 @@ void *rukaml_field(void **obj, uint64_t n)
 {
   return obj[n];
 }
-
-/* int64_t myadd(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t a, int64_t b)
-{
-  printf("a = %ld, b = %ld\n", a, b);
-  return a * b;
-} */
 
 void *rukaml_alloc_closure(void *func, int32_t argsc)
 {
@@ -614,34 +679,8 @@ char rukaml_string_len(int r0, int r1, int r2, int r3, int r4, int r5, void **st
   return rukaml_string_len_imm(str);
 }
 
-void rukaml_fprintf_string(FILE *dest, void **str)
-{
-  if (dest == NULL)
-  {
-    mk_err_fatal("unexpected null ptr");
-  }
-
-  if (str == NULL)
-  {
-    mk_err_fatal("unexpected null ptr");
-  }
-
-  if (TAG(str) != String_tag)
-  {
-    mk_err_fatal("tag mismatch");
-  }
-
-  uint64_t str_len = rukaml_string_len_imm(str);
-
-  uint64_t n = fwrite((void *)(str), sizeof(char), str_len, dest);
-
-  if (n != str_len)
-  {
-    mk_err_warning("fwrite failed");
-  }
-}
-
-uint64_t rukaml_list_length(int r0, int r1, int r2, int r3, int r4, int r5, void **ls)
+uint64_t rukaml_list_length(int r0, int r1, int r2, int r3, int r4, int r5,
+                            void **ls)
 {
   for (uint64_t size = 0;; ++size)
   {
@@ -649,34 +688,34 @@ uint64_t rukaml_list_length(int r0, int r1, int r2, int r3, int r4, int r5, void
     {
       return size;
     }
-    else if (IS_BLOCK(ls) && (TAG(ls) == 1) && (SIZE(ls) == 2)) // ( :: ) of 'a * 'a list
+    else if (IS_BLOCK(ls) && (TAG(ls) == 1) &&
+             (SIZE(ls) == 2)) // ( :: ) of 'a * 'a list
     {
       ls = (void **)(ls[1]);
     }
     else
     {
-      mk_err_fatal("tag mismatch (list expected)");
+      mk_err_fatal("tag mismatch");
     }
   }
 }
 
-void **rukaml_string_of_char_list(int r0, int r1, int r2, int r3, int r4, int r5, void **chs)
+void **rukaml_string_of_char_list(int r0, int r1, int r2, int r3, int r4,
+                                  int r5, void **chs)
 {
-  // chs == 0 means [] lowered to int. TODO: adjust for tagged ints
-  uint64_t chars_n = chs == 0 ? 0 : rukaml_list_length(0, 0, 0, 0, 0, 0, chs);
-
+  uint64_t chars_n = rukaml_list_length(0, 0, 0, 0, 0, 0, chs);
   uint64_t payload_words_n = (chars_n + 7) / 8;
-
-  uint64_t *block = (uint64_t *)rukaml_alloc_block(payload_words_n + 1, String_tag);
+  uint64_t *block =
+      (uint64_t *)rukaml_alloc_block(payload_words_n + 1, String_tag);
 
   block[payload_words_n] = chars_n;
   assert(rukaml_string_len_imm((void **)block) == chars_n);
 
   for (size_t n = 0; n < chars_n; ++n)
   {
-    assert(TAG(chs) == 1); // tag of ( :: )
-    ((char *)(block))[n] = (char)(chs[0]);
-    chs = (void **)(chs[1]);
+    assert(TAG(chs) == 1);                 // tag of ( :: )
+    ((char *)(block))[n] = (char)(chs[0]); // get head
+    chs = (void **)(chs[1]);               // get next list node
   }
 
   return (void **)block;
@@ -709,15 +748,7 @@ bool rukaml_string_equal(int r0, int r1, int r2, int r3, int r4, int r5, void **
     return false;
   }
 
-  for (size_t n = 0; n < rukaml_string_len_imm(left); ++n)
-  {
-    if (rukaml_string_nth_imm(left, n) != rukaml_string_nth_imm(right, n))
-    {
-      return false;
-    }
-  }
-
-  return true;
+  return memcmp(left, right, rukaml_string_len_imm(left)) == 0;
 }
 
 void rukaml_match_failure()
@@ -824,6 +855,33 @@ int64_t rukaml_end_of_input(int r0, int r1, int r2, int r3, int r4, int r5, void
   return false;
 }
 
+void rukaml_fwrite_string(FILE *dest, void **str)
+{
+  if (dest == NULL)
+  {
+    mk_err_fatal("unexpected null ptr");
+  }
+
+  if (str == NULL)
+  {
+    mk_err_fatal("unexpected null ptr");
+  }
+
+  if (TAG(str) != String_tag)
+  {
+    mk_err_fatal("tag mismatch");
+  }
+
+  uint64_t str_len = rukaml_string_len_imm(str);
+
+  uint64_t n = fwrite((void *)(str), sizeof(char), str_len, dest);
+
+  if (n != str_len)
+  {
+    mk_err_warning("fwrite failed");
+  }
+}
+
 void rukaml_fprintf_impl(FILE *dest, void **fmt, va_list args)
 {
   if (dest == NULL)
@@ -892,7 +950,7 @@ void rukaml_fprintf_impl(FILE *dest, void **fmt, va_list args)
     case 's':
     {
       void **str = va_arg(args, void **);
-      rukaml_fprintf_string(dest, str);
+      rukaml_fwrite_string(dest, str);
       break;
     }
 
@@ -1044,7 +1102,7 @@ void *rukaml_sprintf_wrap(int a0, int a1, int a2, int a3, int a4, int a5, void *
 
   if (tmp == NULL)
   {
-    mk_err_fatal("file creating error");
+    mk_err_fatal("can not create temp file");
   }
 
   va_list args;
@@ -1069,7 +1127,8 @@ void *rukaml_sprintf_wrap(int a0, int a1, int a2, int a3, int a4, int a5, void *
   return obj;
 }
 
-void *rukaml_alloc_sprintf_closure(int a0, int a1, int a2, int a3, int a4, int a5, void **fmt)
+void *rukaml_alloc_sprintf_closure(int a0, int a1, int a2, int a3, int a4,
+                                   int a5, void **fmt)
 {
   if (fmt == NULL)
   {

@@ -172,7 +172,8 @@ end
 
 (* int stands for formal arity *)
 let stdlib_externs =
-  [ 2, "rukaml_alloc_closure"
+  [ 1, "add_gc_static_root"
+  ; 2, "rukaml_alloc_closure"
   ; 1, "rukaml_print_int"
   ; 7, "rukaml_print_int_kaml"
   ; 2, "rukaml_applyN"
@@ -297,21 +298,21 @@ module Toplevel = struct
     | _ -> ()
   ;;
 
-  let rec pp_toplevel_label ppf { ident; kind } =
+  let rec pp_toplevel_ident ppf { ident; kind } =
     match kind with
     | Main -> Format.fprintf ppf "main"
-    | Alias { aliasee } -> pp_toplevel_label ppf (find_exn aliasee)
+    | Alias { aliasee } -> pp_toplevel_ident ppf (find_exn aliasee)
     | _ -> Ident.pp ppf ident
   ;;
 
   let pp_label_exn ppf (ident : Ident.t) =
     let toplevel = find_exn ident in
-    pp_toplevel_label ppf toplevel
+    pp_toplevel_ident ppf toplevel
   ;;
 
   let pp_toplevel_exn ppf (ident : Ident.t) =
     let toplevel = find_exn ident in
-    Format.fprintf ppf "[%a]" pp_toplevel_label toplevel
+    Format.fprintf ppf "[%a]" pp_toplevel_ident toplevel
   ;;
 
   let is_toplevel_function (ident : Ident.t) =
@@ -350,12 +351,6 @@ module Mangling = struct
 end
 
 module Addr_of_var = struct
-  (* TODO:
-        Addr_of_var looks for
-            1. local variables
-            2. global labels (.bss, .text, externs and externs' aliases)
-        In some cases we need to check only local ones using Addr_of_local.pp_local_exn
-        I'm not sure if it is truly correct for now. *)
   let pp_var_exn ppf ident =
     match Addr_of_local.pp_local_exn ppf ident with
     | () -> log "Found local variable %s" ident.hum_name
@@ -373,7 +368,7 @@ let pp_dest ppf = function
   | DDiscard -> fprintf ppf "[rukaml_discard]"
   | DReg s -> fprintf ppf "%s" s
   | DStack_var name -> Addr_of_local.pp_local_exn ppf name
-  | DStatic_var name -> Toplevel.pp_toplevel_exn ppf name
+  | DStatic_var name -> fprintf ppf "[%a]" Toplevel.pp_label_exn name
 ;;
 
 let emit_alloc_closure ppf ~fname ~argc =
@@ -487,7 +482,7 @@ let rec generate_body ppf body =
            emit_alloc_closure ppf ~fname ~argc;
            printfn ppf "  mov qword [rsp%+d*8], rax" (count - 1 - i)
          | { kind = Immediate Constant; ident } ->
-           printfn ppf "  mov rax, %a" Toplevel.pp_toplevel_exn ident;
+           printfn ppf "  mov rax, [%a]" Toplevel.pp_label_exn ident;
            printfn ppf "  mov qword [rsp+%d*8], rax" (count - 1 - i)
          | { kind = Main; _ } -> assert false
          | { kind = Alias _; _ } -> assert false
@@ -993,7 +988,7 @@ let rec generate_body ppf body =
          emit_alloc_closure ppf ~fname ~argc;
          printfn ppf "  mov %a, rax" pp_dest dest
        | { kind = Immediate Constant; ident } ->
-         printfn ppf "  mov rax, %a" Toplevel.pp_toplevel_exn ident;
+         printfn ppf "  mov rax, [%a]" Toplevel.pp_label_exn ident;
          printfn ppf "  mov qword %a, rax" pp_dest dest
        | { kind = Main; _ } -> assert false
        | { kind = Alias _; _ } -> assert false
@@ -1228,7 +1223,9 @@ let emit_global_constant ppf ident expr =
   printfn ppf "  push rbp";
   printfn ppf "  mov rbp, rsp";
   generate_body ppf expr;
-  printfn ppf "  mov qword %a, rax" Toplevel.pp_toplevel_exn ident;
+  printfn ppf "  mov qword [%a], rax" Toplevel.pp_label_exn ident;
+  printfn ppf "  lea rdi, [%a]" Toplevel.pp_label_exn ident;
+  printfn ppf "  call add_gc_static_root";
   printfn ppf "  pop rbp";
   printfn ppf "  ret ;;; init_%a" Toplevel.pp_label_exn ident
 ;;
@@ -1334,10 +1331,10 @@ let emit_global_function ppf name body =
     printfn ppf "  mov  rbp, rsp";
     if Toplevel.is_main name
     then (
-      (* >>> TODO!!! : REWRITE THIS GARBAGE (move it to _start) *)
+      (* >>> TODO : move it to _start *)
       printfn ppf "  push rdi          ; save argc";
       printfn ppf "  push rsi          ; save argv";
-      printfn ppf "  mov rdi, rsp      ; ebp  (for gc initialization)";
+      printfn ppf "  mov rdi, rbp      ; ebp  (for gc initialization)";
       printfn ppf "  mov rsi, [rsp+8]  ; argc (for Sys.argv initialization)";
       printfn ppf "  mov rdx, [rsp]    ; argv (for Sys.argv initialization)";
       printfn ppf "  call rukaml_initialize";
