@@ -17,4 +17,4 @@ let second_of_tuple3 t =
 ;;
 
 let four = first_of_tuple2 (second_of_tuple3 (first_of_tuple2 tuple))
-let main = printf "%d" four
+let main = printf "%s" (if four = 4 then "test passed" else "test failed")

@@ -1,7 +1,7 @@
 (*
    test
   (targets amd64)
-  (run (stdout "123456789012"))
+  (run (stdout "123456789abc"))
 *)
 
 let () = printf "123"
@@ -13,7 +13,7 @@ let () =
 ;;
 
 let _ =
-  let () = printf "012" in
+  let () = printf "abc" in
   0
 ;;
 

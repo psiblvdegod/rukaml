@@ -1,12 +1,12 @@
 (*
    test
   (targets amd64)
-  (run (stdout "123"))
+  (run (stdout "you should see this message"))
 *)
 
 
-let () = printf "123"
+let () = printf "you should see this message"
 
 let main = 0
 
-let () = printf "456"
+let () = printf "test failed"
