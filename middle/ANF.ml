@@ -631,14 +631,7 @@ let anf =
       ELet
         ( flag
         , Apat_var name
-        , (let name = gensym_id () in
-           CAtom
-             (ALam
-                ( Apat_var vname
-                , helper body (fun imm ->
-                    ELet
-                      (NonRecursive, Apat_var name, CAtom imm, complex_of_atom (AVar name)))
-                )))
+        , CAtom (ALam (Apat_var vname, helper body complex_of_atom))
         , helper wher complex_of_atom )
     | TLet (_, pat, _typ, rhs, wher) ->
       helper rhs (fun imm_rhs ->
