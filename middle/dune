@@ -11,7 +11,7 @@
   CAA_tests
   ANF_tests
   CPSConv_tests
-  Mangling)
+  mangling)
  (preprocess
   (pps ppx_deriving.show ppx_expect))
  (instrumentation

@@ -280,6 +280,7 @@ module Toplevel = struct
 
   let rec find_exn (ident : Ident.t) =
     match Hashtbl.find_opt store ident with
+    | Some { kind = Alias { aliasee }; _ } -> find_exn aliasee
     | Some x -> x
     | None ->
       Format.eprintf "Can't find toplevel %a" Ident.pp ident;
@@ -334,20 +335,22 @@ module Toplevel = struct
   ;;
 
   (* TODO: it is not the best way to resolve aliases *)
-  let resolve_alias (ident : Ident.t) =
-    match find_exn ident with
-    | { kind = Alias { aliasee }; _ } -> aliasee
+  let rec resolve_alias fident =
+    match find_exn fident with
+    | { kind = Alias { aliasee }; _ } -> resolve_alias aliasee
     | { ident; _ } -> ident
   ;;
 end
 
 module Mangling = struct
-  let initially_bounded =
+  let bounded =
     (* main, stdlib_externs and aliases for them are initially bounded identifiers *)
     [ Ident.ident "main" 0 ]
     @ List.map (fun (_argc, ident) -> Ident.ident ident 0) stdlib_externs
     @ List.map (fun (alias, _aliasee) -> Ident.ident alias 0) stdlib_aliases
   ;;
+
+  let mangle_names_stru = Compile_lib.Mangling.mangle_names_stru ~bounded
 end
 
 module Addr_of_var = struct
@@ -977,10 +980,9 @@ let rec generate_body ppf body =
         Ident.pp
         vname
     | AVar vname when Toplevel.is_toplevel vname ->
-      (* TODO : revisit it !!! *)
       (match Toplevel.find_exn vname with
        | { kind = Function { argc = 0 }; ident } ->
-         (* TODO: it is weird *)
+         (* TODO: it's weird *)
          printfn ppf "  call %a" Ident.pp ident;
          printfn ppf "  mov %a, rax" pp_dest dest
        | { kind = Function { argc }; ident = fname } ->
@@ -1062,26 +1064,20 @@ let rec generate_body ppf body =
     Addr_of_local.remove_local name1;
     printfn ppf "  mov %a, rax" pp_dest dest
   and emit_rukaml_apply1 dest ~fname ~arg =
-    let fident =
-      (* TODO : definitely it is not the best way to resolve aliases *)
-      Toplevel.resolve_alias (Ident.ident fname 0)
-    in
+    let fident = Ident.ident fname 0 in
     match arg with
     | ANF.AVar v when Addr_of_var.is_defined v ->
-      printfn ppf "  mov rdi, %a" Ident.pp fident;
+      printfn ppf "  mov rdi, %a" Toplevel.pp_label_exn fident;
       printfn ppf "  mov rsi, %a" Addr_of_var.pp_var_exn v;
       printfn ppf "  call rukaml_apply1";
       printfn ppf "  mov %a, rax" pp_dest dest
     | _ ->
       helper_a (DReg "rsi") arg;
-      printfn ppf "  mov rdi, %a" Ident.pp fident;
+      printfn ppf "  mov rdi, %a" Toplevel.pp_label_exn fident;
       printfn ppf "  call rukaml_apply1";
       printfn ppf "  mov %a, rax" pp_dest dest
   and emit_rukaml_apply2 dest ~fname ~arg1 ~arg2 =
-    let fident =
-      (* TODO : definitely it is not the best way to resolve aliases *)
-      Toplevel.resolve_alias (Ident.ident fname 0)
-    in
+    let fident = Ident.ident fname 0 in
     (match arg1, arg2 with
      | ANF.AVar v1, ANF.AVar v2 ->
        printfn ppf "  mov rsi, %a" Addr_of_var.pp_var_exn v1;
@@ -1099,18 +1095,15 @@ let rec generate_body ppf body =
        helper_a (DReg "rdx") arg2;
        printfn ppf "  mov qword rsi, [rsp]";
        printfn ppf "  add rsp, 8*2");
-    printfn ppf "  mov rdi, %a" Ident.pp fident;
+    printfn ppf "  mov rdi, %a" Toplevel.pp_label_exn fident;
     printfn ppf "  call rukaml_apply1";
     printfn ppf "  mov %a, rax" pp_dest dest
   and emit_rukaml_applyN dest ~fname ~argc ~arg1 =
-    let fident =
-      (* TODO : definitely it is not the best way to resolve aliases *)
-      Toplevel.resolve_alias (Ident.ident fname 0)
-    in
+    let fident = Ident.ident fname 0 in
     assert (argc > 1);
     match arg1 with
     | ANF.AVar v when Addr_of_var.is_defined v ->
-      printfn ppf "  mov rdi, %a" Ident.pp fident;
+      printfn ppf "  mov rdi, %a" Toplevel.pp_label_exn fident;
       printfn ppf "  mov rsi, %d" argc;
       printfn ppf "  call rukaml_alloc_closure";
       printfn ppf "  mov rdi, rax";
@@ -1120,7 +1113,7 @@ let rec generate_body ppf body =
       printfn ppf "  call rukaml_applyN";
       printfn ppf "  mov %a, rax" pp_dest dest
     | _ ->
-      printfn ppf "  mov rdi, %a" Ident.pp fident;
+      printfn ppf "  mov rdi, %a" Toplevel.pp_label_exn fident;
       printfn ppf "  mov rsi, %d" argc;
       printfn ppf "  call rukaml_alloc_closure";
       let name1 = Ident.of_string @@ gen_name ~prefix:"pad" () in
@@ -1354,12 +1347,9 @@ let put_discard ppf =
 ;;
 
 let codegen ?(wrap_main_into_start = true) anf file =
+  let anf = Mangling.mangle_names_stru anf in
   (* log "Going to generate code here %s %d" __FUNCTION__ __LINE__; *)
   log "ANF: @[%a@]" Compile_lib.ANF.pp_stru anf;
-  let anf =
-    Compile_lib.Mangling.expand_aliases_stru ~aliases:stdlib_aliases ~bounded:[] anf
-  in
-  let anf = Compile_lib.Mangling.rename_stru ~bounded:Mangling.initially_bounded anf in
   Stdio.Out_channel.with_file file ~f:(fun ch ->
     let ppf = Format.formatter_of_out_channel ch in
     printfn ppf "section .note.GNU-stack noalloc noexec nowrite progbits";
