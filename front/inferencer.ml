@@ -1039,9 +1039,9 @@ let vb ?(env = start_env) table (flg, pat, body) : (_, [> error ]) Result.t =
     match flg, pat with
     | Parsetree.NonRecursive, _ ->
       (* TODO: is ~level:0 OK here? *)
-      let* env, tpat, _pat_ty = check_pat ~level:0 env table pat in
+      let* env_with_binding, tpat, _pat_ty = check_pat ~level:0 env table pat in
       let* rhs_ty, typed_rhs = infer env table body in
-      return (env, rhs_ty, tpat, typed_rhs)
+      return (env_with_binding, rhs_ty, tpat, typed_rhs)
     | Recursive, Parsetree.PVar name ->
       let* binder = fresh in
       let tv = Typedtree.tv binder ~level in
