@@ -300,7 +300,7 @@ void rukaml_gc_compact(uint64_t rsp)
       if (TAG(obj_ptr) != Forward_tag)
         dfs(&new_size, obj_ptr);
       // update stack slot with forwarded address
-      *(uint64_t *)(cur + 1) = obj_ptr[0];
+      *(uint64_t *)(cur + 8) = obj_ptr[0];
     }
   }
 
@@ -319,6 +319,14 @@ void rukaml_gc_compact(uint64_t rsp)
   // end static roots walking
 
   GC.allocated_words = new_size;
+
+  // begin swap banks
+  uint64_t *tmp = GC.main_bank;
+  GC.main_bank = GC.backup_bank;
+  GC.backup_bank = tmp;
+  GC.main_bank_fin = GC.main_bank + HEAP_SIZE;
+  GC.backup_bank_fin = GC.backup_bank + HEAP_SIZE;
+  // end swap banks
 }
 
 void rukaml_gc_print_stats(void)

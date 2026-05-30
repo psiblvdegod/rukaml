@@ -169,6 +169,7 @@ let standart_globals =
   @ [ "string_nth"; "string_len"; "string_equal"; "string_of_char_list" ]
   @ [ "array_get"; "array_set"; "array_len" ]
   @ [ "char_code" ]
+  @ [ "gc_compact"; "gc_stats" ]
   |> String_set.of_list
 ;;
 
