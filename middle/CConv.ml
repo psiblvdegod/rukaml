@@ -249,13 +249,25 @@ let conv ?(standart_globals = standart_globals)
           | None ->
             (* TODO(Kakadu): Create a new lambda here too *)
             log "None : %d" __LINE__;
-            let new_f = gensym ~prefix:"__lifted_lam" () in
+            let new_f =
+              gensym
+                ~prefix:
+                  (* TODO: it is not the best way to provide fresh names *)
+                  "__lifted_lam"
+                ()
+            in
             let* rhs = helper (SS.union (vars_from_patterns arg_pats) globals) rhs in
             let* () = save (NonRecursive, PVar new_f, elams arg_pats rhs) in
             return (EVar new_f)
           | Some extra ->
             log "Some %d, %a" __LINE__ SS.pp extra;
-            let new_f = gensym ~prefix:"__lifted_lam" () in
+            let new_f =
+              gensym
+                ~prefix:
+                  (* TODO: it is not the best way to provide fresh names *)
+                  "__lifted_lam"
+                ()
+            in
             (* TODO: maybe call on e too? *)
             let es = SS.to_seq extra |> List.of_seq in
             let* rhs = helper (SS.union (vars_from_patterns arg_pats) globals) rhs in
@@ -307,9 +319,13 @@ let conv ?(standart_globals = standart_globals)
           | [] -> return (elet ~isrec pat (elams args rhs) body)
           | _ ->
             let rhs = elams args rhs in
-            (* TODO: check if renaming here is really required *)
-            let prefix = "__lifted_let" in
-            let pat, rhs, body = rename_vars ~prefix (isrec, pat, rhs, body) in
+            let pat, rhs, body =
+              rename_vars
+                ~prefix:
+                  (* notice: fresh name is really required here *)
+                  "__lifted_let"
+                (isrec, pat, rhs, body)
+            in
             let* () = save (isrec, pat, rhs) in
             return body)
        | Some extra ->
